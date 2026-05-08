@@ -1,0 +1,27 @@
+[package]
+name = "spaceship-workgroup"
+version = "0.1.0"
+edition = "2021"
+authors = ["nuck"]
+description = "Workgroup marker protocol and shell utility for Spaceship repositories"
+license = "MIT"
+repository = "https://github.com/holo-q/spaceship-workgroup"
+readme = "README.md"
+
+[[bin]]
+name = "spacewg"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
