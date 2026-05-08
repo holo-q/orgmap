@@ -4,8 +4,8 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
-#[command(name = "spacewg")]
-#[command(about = "Query Spaceship workgroup markers as JSON")]
+#[command(name = "orgmap")]
+#[command(about = "Query org/workgroup markers as JSON")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -43,11 +43,11 @@ struct MarkerResult {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Identity { path } => print_json(&spaceship_workgroup::identity_for_path(&path))?,
-        Command::Definition { path } => print_json(&spaceship_workgroup::definition_for_path(&path))?,
-        Command::Stack { path } => print_json(&spaceship_workgroup::discover_workgroup_stack(&path))?,
+        Command::Identity { path } => print_json(&orgmap::identity_for_path(&path))?,
+        Command::Definition { path } => print_json(&orgmap::definition_for_path(&path))?,
+        Command::Stack { path } => print_json(&orgmap::discover_workgroup_stack(&path))?,
         Command::Marker { path } => print_json(&MarkerResult {
-            marker: spaceship_workgroup::toml_path_for_path(&path),
+            marker: orgmap::toml_path_for_path(&path),
         })?,
     }
     Ok(())

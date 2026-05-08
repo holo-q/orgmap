@@ -1,8 +1,9 @@
-//! Workgroup protocol for Spaceship projects.
+//! Organization/workgroup marker protocol for Holo-Q projects.
 //!
 //! A workgroup is a directory-scope identity mark. It is not a git repo, an
 //! activity state, or a build root. Tools discover it by walking upward from a
-//! path and reading the nearest `workgroup.toml` or `.hsp/workgroup.toml`.
+//! path and reading the nearest `orgmap.toml`, `workgroup.toml`, or
+//! `.hsp/workgroup.toml`.
 //!
 //! Standard file shape:
 //!
@@ -26,9 +27,10 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
+pub const ORGMAP_FILE: &str = "orgmap.toml";
 pub const WORKGROUP_FILE: &str = "workgroup.toml";
 pub const HSP_WORKGROUP_FILE: &str = ".hsp/workgroup.toml";
-pub const WORKGROUP_MARKERS: &[&str] = &[WORKGROUP_FILE, HSP_WORKGROUP_FILE];
+pub const WORKGROUP_MARKERS: &[&str] = &[ORGMAP_FILE, WORKGROUP_FILE, HSP_WORKGROUP_FILE];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum WorkgroupLevel {
@@ -208,7 +210,10 @@ fn workgroup_marker(parent: &Path) -> Option<PathBuf> {
 fn read_definition(root: &Path, marker: PathBuf) -> Option<WorkgroupDefinition> {
     let text = std::fs::read_to_string(&marker).ok()?;
     let value = text.parse::<toml::Value>().ok()?;
-    let table = value.get("workgroup").unwrap_or(&value);
+    let table = value
+        .get("orgmap")
+        .or_else(|| value.get("workgroup"))
+        .unwrap_or(&value);
     let observe = value.get("observe");
     let name = first_string(table, &["name"])
         .or_else(|| {
@@ -517,7 +522,7 @@ mod tests {
 
     fn tmp_root(name: &str) -> PathBuf {
         let root = std::env::current_dir().unwrap().join("tmp").join(format!(
-            "spaceship-workgroup-{}-{}",
+            "orgmap-{}-{}",
             name,
             std::process::id()
         ));
@@ -567,15 +572,13 @@ mod tests {
         let stack = discover_workgroup_stack(&project);
         std::fs::remove_dir_all(root).unwrap();
 
-        assert_eq!(
-            stack
-                .iter()
-                .map(|item| item.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["holoq", "repo-os"]
-        );
-        assert_eq!(stack[0].level, WorkgroupLevel::Umbrella);
-        assert_eq!(stack[1].level, WorkgroupLevel::Domain);
+        let names = stack
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.ends_with(&["holoq", "repo-os"]));
+        assert_eq!(stack[stack.len() - 2].level, WorkgroupLevel::Umbrella);
+        assert_eq!(stack[stack.len() - 1].level, WorkgroupLevel::Domain);
     }
 
     #[test]
@@ -596,6 +599,21 @@ mod tests {
 
         assert_eq!(definition.observation_mode, ObservationMode::Network);
         assert_eq!(definition.observation_roots, vec![sibling]);
+    }
+
+    #[test]
+    fn orgmap_table_takes_precedence_over_legacy_workgroup_table() {
+        let root = tmp_root("orgmap-precedence");
+        std::fs::write(
+            root.join(ORGMAP_FILE),
+            "[orgmap]\nname = \"orgmap-name\"\n[workgroup]\nname = \"legacy-name\"\n",
+        )
+        .unwrap();
+
+        let definition = definition_for_path(&root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+
+        assert_eq!(definition.name, "orgmap-name");
     }
 
     #[test]

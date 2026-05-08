@@ -1,15 +1,15 @@
 [package]
-name = "spaceship-workgroup"
+name = "orgmap"
 version = "0.1.0"
 edition = "2021"
 authors = ["nuck"]
-description = "Workgroup marker protocol and shell utility for Spaceship repositories"
+description = "Organization/workgroup marker protocol and shell utility"
 license = "MIT"
-repository = "https://github.com/holo-q/spaceship-workgroup"
+repository = "https://github.com/holo-q/orgmap"
 readme = "README.md"
 
 [[bin]]
-name = "spacewg"
+name = "orgmap"
 path = "src/main.rs"
 
 [dependencies]
