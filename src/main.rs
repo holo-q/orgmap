@@ -4,8 +4,8 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
-#[command(name = "orgmap")]
-#[command(about = "Query org/workgroup markers as JSON")]
+#[command(name = "org")]
+#[command(about = "Doctor orgmap markers as JSON")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -13,17 +13,17 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Resolve the nearest workgroup identity for a path.
+    /// Resolve the nearest orgmap identity for a path.
     Identity {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Resolve the nearest full workgroup definition for a path.
+    /// Resolve the nearest full orgmap definition for a path.
     Definition {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Resolve every ancestor workgroup marker for a path.
+    /// Resolve every ancestor orgmap marker for a path.
     Stack {
         #[arg(default_value = ".")]
         path: PathBuf,

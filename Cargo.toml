@@ -9,7 +9,7 @@ repository = "https://github.com/holo-q/orgmap"
 readme = "README.md"
 
 [[bin]]
-name = "orgmap"
+name = "org"
 path = "src/main.rs"
 
 [dependencies]

@@ -27,10 +27,10 @@ let stack = orgmap::discover_workgroup_stack(path);
 let marker = orgmap::toml_path_for_path(path);
 ```
 
-Nu callers use the JSON-first CLI:
+Nu callers use the JSON-first `org` CLI:
 
 ```nu
-let wg = (orgmap identity . | from json)
-let stack = (orgmap stack . | from json)
-let marker = (orgmap marker . | from json)
+let wg = (org identity . | from json)
+let stack = (org stack . | from json)
+let marker = (org marker . | from json)
 ```
