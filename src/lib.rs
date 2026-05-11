@@ -27,6 +27,8 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
+pub mod institution;
+
 pub const ORGMAP_FILE: &str = "orgmap.toml";
 pub const WORKGROUP_FILE: &str = "workgroup.toml";
 pub const HSP_WORKGROUP_FILE: &str = ".hsp/workgroup.toml";
