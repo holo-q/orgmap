@@ -17,6 +17,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// List configured institutions.
+    List {
+        /// Emit JSON instead of terminal text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Current operational report for the active institution.
     Work {
         /// Emit JSON instead of terminal text.
@@ -58,7 +64,15 @@ struct MarkerResult {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    match cli.command.unwrap_or(Command::Work { json: false }) {
+    match cli.command.unwrap_or(Command::List { json: false }) {
+        Command::List { json } => {
+            let orgs = orgmap::institution::configured_orgs(&std::env::current_dir()?);
+            if json {
+                print_json(&orgs)?;
+            } else {
+                print_org_list(&orgs);
+            }
+        }
         Command::Work { json } => {
             let institution = orgmap::institution::load_current_institution(
                 cli.config.as_deref(),
@@ -96,6 +110,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn print_json<T: Serialize>(value: &T) -> serde_json::Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+fn print_org_list(orgs: &[orgmap::institution::OrgListing]) {
+    println!("org — configured institutions");
+    if let Some(path) = orgmap::institution::config_dir_path() {
+        println!("  config dir: {}", display_path(&path));
+    }
+    println!("  env: ORGMAP_NAME, ORGMAP_ROOT, ORGMAP_CONFIG");
+    println!();
+
+    if orgs.is_empty() {
+        println!("No organizations configured.");
+        println!("Create ~/.config/orgmap/config/<name>.toml with root/config fields.");
+        println!("Agents may use ORGMAP_NAME + ORGMAP_ROOT or ORGMAP_CONFIG.");
+        return;
+    }
+
+    for org in orgs {
+        let default = if org.default { "*" } else { " " };
+        let active = if org.active { "@" } else { " " };
+        let root = org
+            .root
+            .as_ref()
+            .map(|path| display_path(path))
+            .unwrap_or_else(|| "-".to_string());
+        let config = org
+            .config_path
+            .as_ref()
+            .map(|path| display_path(path))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{}{} {:<18} {:<28} {:<28} {}",
+            default, active, org.name, root, config, org.source
+        );
+    }
 }
 
 fn print_work_report(report: &orgmap::institution::WorkReport) {

@@ -143,6 +143,16 @@ pub struct WorkspaceIntro {
     pub projects: Vec<Project>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct OrgListing {
+    pub name: String,
+    pub root: Option<PathBuf>,
+    pub config_path: Option<PathBuf>,
+    pub source: String,
+    pub default: bool,
+    pub active: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct Registry {
     #[serde(default)]
@@ -174,11 +184,8 @@ struct SectionEntry {
 }
 
 pub fn discover_config_path(location: &Path) -> Option<PathBuf> {
-    if let Ok(raw) = std::env::var("ORGMAP_CONFIG") {
-        let path = expand_user(raw.trim());
-        if is_full_orgmap(&path) {
-            return Some(canonical_or_self(path));
-        }
+    if let Some(path) = env_config_path() {
+        return Some(path);
     }
 
     let start = normalize_location(location);
@@ -189,7 +196,7 @@ pub fn discover_config_path(location: &Path) -> Option<PathBuf> {
         }
     }
 
-    registry_config_path()
+    registry_default_config_path()
 }
 
 pub fn load_institution(config_path: &Path) -> Result<Institution, Box<dyn std::error::Error>> {
@@ -295,6 +302,42 @@ pub fn intro_report(institution: &Institution) -> IntroReport {
         gh_org: institution.gh_org.clone(),
         workspaces,
     }
+}
+
+pub fn config_dir_path() -> Option<PathBuf> {
+    xdg_config_home().map(|path| path.join("orgmap").join("config"))
+}
+
+pub fn configured_orgs(location: &Path) -> Vec<OrgListing> {
+    let active_config = discover_config_path(location);
+    let current = normalize_location(location);
+    let mut orgs = Vec::new();
+
+    if let Some(org) = env_org_listing() {
+        orgs.push(org);
+    }
+    orgs.extend(config_dir_orgs());
+    orgs.extend(legacy_registry_orgs());
+
+    for org in &mut orgs {
+        org.active = org_is_active(org, &current, active_config.as_deref());
+    }
+
+    let has_default = orgs.iter().any(|org| org.default);
+    if !has_default && orgs.len() == 1 {
+        if let Some(org) = orgs.first_mut() {
+            org.default = true;
+        }
+    }
+
+    orgs.sort_by(|a, b| {
+        b.default
+            .cmp(&a.default)
+            .then_with(|| b.active.cmp(&a.active))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.source.cmp(&b.source))
+    });
+    orgs
 }
 
 fn build_projects(config: &OrgConfig, local: &[LocalProject]) -> Vec<Project> {
@@ -633,28 +676,193 @@ fn is_full_orgmap(path: &Path) -> bool {
     value.get("scan").is_some() && value.get("workspaces").is_some()
 }
 
-fn registry_config_path() -> Option<PathBuf> {
-    let path = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?
-        .join("orgmap")
-        .join("config.toml");
-    let text = std::fs::read_to_string(path).ok()?;
-    let registry = toml::from_str::<Registry>(&text).ok()?;
-    let default = registry.default?;
-    let institution = registry.institutions.get(&default)?;
-    institution
-        .config
-        .as_ref()
-        .map(|config| expand_user(config))
+fn env_config_path() -> Option<PathBuf> {
+    let path = std::env::var("ORGMAP_CONFIG")
+        .ok()
+        .map(|raw| expand_user(raw.trim()))
         .or_else(|| {
-            institution
+            std::env::var("ORGMAP_ROOT")
+                .ok()
+                .map(|raw| expand_user(raw.trim()).join(ORGMAP_FILE))
+        })?;
+    is_full_orgmap(&path).then(|| canonical_or_self(path))
+}
+
+fn registry_default_config_path() -> Option<PathBuf> {
+    configured_default_config_path().filter(|path| is_full_orgmap(path))
+}
+
+fn configured_default_config_path() -> Option<PathBuf> {
+    config_dir_orgs()
+        .into_iter()
+        .find(|org| org.default)
+        .and_then(|org| org.config_path)
+        .or_else(|| {
+            let orgs = config_dir_orgs();
+            (orgs.len() == 1)
+                .then(|| orgs.into_iter().next()?.config_path)
+                .flatten()
+        })
+        .or_else(legacy_registry_default_config_path)
+}
+
+fn env_org_listing() -> Option<OrgListing> {
+    let config = std::env::var("ORGMAP_CONFIG")
+        .ok()
+        .map(|raw| expand_user(raw.trim()));
+    let root = std::env::var("ORGMAP_ROOT")
+        .ok()
+        .map(|raw| expand_user(raw.trim()));
+    if config.is_none() && root.is_none() {
+        return None;
+    }
+    let config = config.or_else(|| root.as_ref().map(|path| path.join(ORGMAP_FILE)));
+    let root = root
+        .or_else(|| {
+            config
+                .as_ref()
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+        })
+        .map(canonical_or_self);
+    let config = config.map(canonical_or_self);
+    let name = std::env::var("ORGMAP_NAME")
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .or_else(|| basename(root.as_deref()))
+        .or_else(|| basename(config.as_ref().and_then(|path| path.parent())))
+        .unwrap_or_else(|| "env".to_string());
+
+    Some(OrgListing {
+        name,
+        root,
+        config_path: config,
+        source: "env".to_string(),
+        default: true,
+        active: false,
+    })
+}
+
+fn config_dir_orgs() -> Vec<OrgListing> {
+    let Some(dir) = config_dir_path() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut orgs = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension() == Some(OsStr::new("toml"))).then_some(path)
+        })
+        .filter_map(|path| config_file_org(&path))
+        .collect::<Vec<_>>();
+    orgs.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.source.cmp(&b.source)));
+    orgs
+}
+
+fn config_file_org(path: &Path) -> Option<OrgListing> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return None;
+    };
+    let value = text.parse::<toml::Value>().ok()?;
+    let table = value.get("org").unwrap_or(&value);
+    let root = string_field(table, "root").map(|path| canonical_or_self(expand_user(&path)));
+    let config = string_field(table, "config")
+        .map(|path| canonical_or_self(expand_user(&path)))
+        .or_else(|| root.as_ref().map(|path| path.join(ORGMAP_FILE)));
+    let name = string_field(table, "name")
+        .or_else(|| path.file_stem().and_then(OsStr::to_str).map(str::to_string))?;
+    let default = table
+        .get("default")
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+
+    Some(OrgListing {
+        name,
+        root,
+        config_path: config,
+        source: format!(
+            "config/{}",
+            path.file_name()
+                .and_then(OsStr::to_str)
+                .unwrap_or("unknown.toml")
+        ),
+        default,
+        active: false,
+    })
+}
+
+fn legacy_registry_orgs() -> Vec<OrgListing> {
+    let Some(path) = legacy_registry_path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(registry) = toml::from_str::<Registry>(&text) else {
+        return Vec::new();
+    };
+    let default = registry.default;
+    registry
+        .institutions
+        .into_iter()
+        .map(|(name, institution)| {
+            let root = institution
                 .root
                 .as_ref()
-                .map(|root| expand_user(root).join(ORGMAP_FILE))
+                .map(|root| canonical_or_self(expand_user(root)));
+            let config = institution
+                .config
+                .as_ref()
+                .map(|config| canonical_or_self(expand_user(config)))
+                .or_else(|| root.as_ref().map(|root| root.join(ORGMAP_FILE)));
+            OrgListing {
+                default: default.as_ref() == Some(&name),
+                name,
+                root,
+                config_path: config,
+                source: "config.toml".to_string(),
+                active: false,
+            }
         })
-        .filter(|path| is_full_orgmap(path))
-        .map(canonical_or_self)
+        .collect()
+}
+
+fn legacy_registry_default_config_path() -> Option<PathBuf> {
+    legacy_registry_orgs()
+        .into_iter()
+        .find(|org| org.default)
+        .and_then(|org| org.config_path)
+}
+
+fn legacy_registry_path() -> Option<PathBuf> {
+    xdg_config_home().map(|path| path.join("orgmap").join("config.toml"))
+}
+
+fn org_is_active(org: &OrgListing, current: &Path, active_config: Option<&Path>) -> bool {
+    if let Some(config) = &org.config_path {
+        if active_config.is_some_and(|active| active == config) {
+            return true;
+        }
+    }
+    org.root
+        .as_deref()
+        .is_some_and(|root| current.starts_with(root))
+}
+
+fn basename(path: Option<&Path>) -> Option<String> {
+    path.and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
+}
+
+fn xdg_config_home() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join(".config")))
 }
 
 fn expand_user_path(path: &Path) -> PathBuf {

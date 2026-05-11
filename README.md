@@ -43,12 +43,15 @@ let marker = (org marker . | from json)
 
 ## CLI
 
-Bare `org` defaults to `org work`.
+Bare `org` lists the user configured organizations. The operational report is
+explicitly `org work`.
 
 ```sh
-org                 # current operational report
+org                 # configured organizations from XDG config and env
+org list            # same list, explicit
 org work            # dirty/ahead/no-upstream local project report
 org intro           # familiarization report: workspaces and short project descriptions
+org list --json
 org work --json     # machine-readable report for dashboards and agents
 org intro --json
 org identity .
@@ -62,7 +65,25 @@ Config discovery:
 1. `--config <path>`
 2. `ORGMAP_CONFIG`
 3. ancestor `orgmap.toml` containing the full institution schema
-4. `$XDG_CONFIG_HOME/orgmap/config.toml`
+4. default org in `$XDG_CONFIG_HOME/orgmap/config/*.toml`
+5. legacy `$XDG_CONFIG_HOME/orgmap/config.toml`
+
+User organizations live as one file per org:
+
+```toml
+name = "holoq"
+root = "~/holoq"
+config = "~/holoq/orgmap.toml"
+default = true
+```
+
+The same fields may be nested under `[org]`. Agent-only sessions can define an
+organization without mutating user config:
+
+```sh
+ORGMAP_NAME=holoq ORGMAP_ROOT=~/holoq org
+ORGMAP_NAME=holoq ORGMAP_CONFIG=~/holoq/orgmap.toml org work
+```
 
 Registry shape:
 
