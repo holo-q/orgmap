@@ -54,6 +54,7 @@ org work            # dirty/ahead/no-upstream local project report
 org report [NAME]   # project map grouped by workspace
 org git [NAME]      # detailed local git-state report
 org plug            # Claude/Codex agent plugin carrier report
+org plug --upstream # gh-backed manifest parity + carrier repo git-state verifier
 org intro           # familiarization report: workspaces and short project descriptions
 org list --json
 org work --json     # machine-readable report for dashboards and agents

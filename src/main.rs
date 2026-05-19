@@ -53,6 +53,9 @@ enum Command {
     },
     /// Agent plugin carrier report.
     Plug {
+        /// Verify GitHub manifest parity and carrier repo git state.
+        #[arg(long)]
+        upstream: bool,
         /// Emit JSON instead of terminal text.
         #[arg(long)]
         json: bool,
@@ -142,12 +145,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 print_git_report(&institution);
             }
         }
-        Some(Command::Plug { json }) => {
+        Some(Command::Plug { upstream, json }) => {
             let institution = orgmap::institution::load_current_institution(
                 cli.config.as_deref(),
                 &std::env::current_dir()?,
             )?;
-            let report = orgmap::plugin::plugin_report(&institution);
+            let report = orgmap::plugin::plugin_report(&institution, upstream);
             if json {
                 print_json(&report)?;
             } else {
@@ -461,11 +464,50 @@ fn print_plugin_report(report: &orgmap::plugin::PluginReport) {
         "  {} projects · {} surfaces · {} Claude · {} Codex · {} invalid",
         report.projects, report.surfaces, report.claude, report.codex, report.invalid
     );
+    if let Some(upstream) = &report.upstream {
+        println!(
+            "  upstream: {} synced · {} changed · {} missing · {} errors",
+            color(48, &upstream.synced.to_string()),
+            color(214, &upstream.changed.to_string()),
+            color(196, &upstream.missing.to_string()),
+            color(196, &upstream.error.to_string())
+        );
+        println!(
+            "  carriers: {} dirty · {} ahead · {} behind · {} no upstream",
+            color(196, &upstream.dirty.to_string()),
+            color(214, &upstream.ahead.to_string()),
+            color(39, &upstream.behind.to_string()),
+            dim(&upstream.no_upstream.to_string())
+        );
+    }
     println!();
     if report.plugins.is_empty() {
         println!("No agent plugin manifests found.");
         return;
     }
+
+    let rows = report
+        .plugins
+        .iter()
+        .map(plugin_report_row)
+        .collect::<Vec<_>>();
+    let name_w = rows.iter().map(|row| row.name.raw.len()).max().unwrap_or(4);
+    let version_w = rows
+        .iter()
+        .map(|row| row.version.raw.len())
+        .max()
+        .unwrap_or(7);
+    let caps_w = rows.iter().map(|row| row.caps.raw.len()).max().unwrap_or(4);
+    let carrier_w = rows
+        .iter()
+        .map(|row| row.carrier.raw.len())
+        .max()
+        .unwrap_or(7);
+    let upstream_w = rows
+        .iter()
+        .map(|row| row.upstream.raw.len())
+        .max()
+        .unwrap_or(8);
 
     let mut current = "";
     for plugin in &report.plugins {
@@ -473,34 +515,89 @@ fn print_plugin_report(report: &orgmap::plugin::PluginReport) {
             current = &plugin.project;
             println!("{} {}", dim("──"), color_bold(39, &plugin.project));
         }
-        let host = match plugin.host {
-            orgmap::plugin::PluginHost::Claude => color_bold(214, "claude"),
-            orgmap::plugin::PluginHost::Codex => color_bold(48, "codex"),
-        };
-        let name = plugin.name.as_deref().unwrap_or("invalid");
-        let version = plugin.version.as_deref().unwrap_or("-");
-        let caps = plugin_caps(plugin);
+        let row = plugin_report_row(plugin);
         let manifest = display_path(&plugin.manifest);
         if plugin.valid {
             println!(
-                "  {:<8} {:<20} {:<8} {:<34} {}",
-                host,
-                name,
-                version,
-                caps,
+                "  {}  {}  {}  {}  {}  {}  {}",
+                pad_cell(&row.host, 6),
+                pad_cell(&row.name, name_w),
+                pad_cell(&row.version, version_w),
+                pad_cell(&row.caps, caps_w),
+                pad_cell(&row.carrier, carrier_w),
+                pad_cell(&row.upstream, upstream_w),
                 dim(&manifest)
             );
         } else {
             println!(
-                "  {:<8} {:<20} {:<8} {} {}",
-                host,
-                color_bold(196, name),
-                version,
+                "  {}  {}  {}  {}  {}  {}  {} {}",
+                pad_cell(&row.host, 6),
+                pad_cell(&row.name, name_w),
+                pad_cell(&row.version, version_w),
+                pad_cell(&row.caps, caps_w),
+                pad_cell(&row.carrier, carrier_w),
+                pad_cell(&row.upstream, upstream_w),
                 color(196, plugin.error.as_deref().unwrap_or("invalid manifest")),
                 dim(&manifest)
             );
         }
     }
+}
+
+struct StyledCell {
+    raw: String,
+    styled: String,
+}
+
+struct PluginReportRow {
+    host: StyledCell,
+    name: StyledCell,
+    version: StyledCell,
+    caps: StyledCell,
+    carrier: StyledCell,
+    upstream: StyledCell,
+}
+
+fn plugin_report_row(plugin: &orgmap::plugin::PluginSurface) -> PluginReportRow {
+    let host = match plugin.host {
+        orgmap::plugin::PluginHost::Claude => StyledCell {
+            raw: "claude".to_string(),
+            styled: color_bold(214, "claude"),
+        },
+        orgmap::plugin::PluginHost::Codex => StyledCell {
+            raw: "codex".to_string(),
+            styled: color_bold(48, "codex"),
+        },
+    };
+    let name = plugin.name.as_deref().unwrap_or("invalid").to_string();
+    let name = if plugin.valid {
+        StyledCell {
+            raw: name.clone(),
+            styled: name,
+        }
+    } else {
+        StyledCell {
+            raw: name.clone(),
+            styled: color_bold(196, &name),
+        }
+    };
+    let version = plugin.version.as_deref().unwrap_or("-").to_string();
+    PluginReportRow {
+        host,
+        name,
+        version: StyledCell {
+            raw: version.clone(),
+            styled: version,
+        },
+        caps: plugin_caps(plugin),
+        carrier: plugin_carrier_badge(plugin),
+        upstream: plugin_upstream_badge(plugin),
+    }
+}
+
+fn pad_cell(cell: &StyledCell, width: usize) -> String {
+    let pad = width.saturating_sub(cell.raw.len());
+    format!("{}{}", cell.styled, " ".repeat(pad))
 }
 
 fn print_work_report(report: &orgmap::institution::WorkReport) {
@@ -719,7 +816,7 @@ fn abbreviate_age(age: &str) -> String {
     format!("{amount}{unit}")
 }
 
-fn plugin_caps(plugin: &orgmap::plugin::PluginSurface) -> String {
+fn plugin_caps(plugin: &orgmap::plugin::PluginSurface) -> StyledCell {
     let mut caps = Vec::new();
     if let Some(feature) = &plugin.skills {
         caps.push(feature_chip("skills", feature.count, feature.exists));
@@ -734,25 +831,99 @@ fn plugin_caps(plugin: &orgmap::plugin::PluginSurface) -> String {
         caps.push(feature_chip("hooks", feature.count, feature.exists));
     }
     if plugin.interface {
-        caps.push(color(81, "ui"));
+        caps.push(StyledCell {
+            raw: "ui".to_string(),
+            styled: color(81, "ui"),
+        });
     }
     if caps.is_empty() {
-        dim("metadata-only")
+        StyledCell {
+            raw: "metadata-only".to_string(),
+            styled: dim("metadata-only"),
+        }
     } else {
-        caps.join(" ")
+        join_cells(&caps, " ")
     }
 }
 
-fn feature_chip(label: &str, count: usize, exists: bool) -> String {
+fn plugin_carrier_badge(plugin: &orgmap::plugin::PluginSurface) -> StyledCell {
+    let Some(git) = plugin.carrier_git.as_ref() else {
+        return styled_dim("no-git");
+    };
+    let ahead = git.ahead.unwrap_or(0);
+    let behind = git.behind.unwrap_or(0);
+    if git.dirty > 0 {
+        if ahead > 0 {
+            return styled_color(196, &format!("dirty:{}↑{}", git.dirty, ahead));
+        }
+        if behind > 0 {
+            return styled_color(196, &format!("dirty:{}↓{}", git.dirty, behind));
+        }
+        return styled_color(196, &format!("dirty:{}", git.dirty));
+    }
+    if ahead > 0 {
+        return styled_color(214, &format!("ahead:{ahead}"));
+    }
+    if behind > 0 {
+        return styled_color(39, &format!("behind:{behind}"));
+    }
+    if !git.has_upstream {
+        return styled_dim("no-upstream");
+    }
+    styled_color(48, "repo-synced")
+}
+
+fn plugin_upstream_badge(plugin: &orgmap::plugin::PluginSurface) -> StyledCell {
+    let Some(upstream) = plugin.upstream.as_ref() else {
+        return styled_dim("local-only");
+    };
+    match upstream.status {
+        orgmap::plugin::PluginUpstreamStatus::Synced => styled_color(48, "manifest-ok"),
+        orgmap::plugin::PluginUpstreamStatus::Changed => styled_color(214, "manifest-diff"),
+        orgmap::plugin::PluginUpstreamStatus::Missing => styled_color(196, "manifest-missing"),
+        orgmap::plugin::PluginUpstreamStatus::Error => styled_color(196, "gh-error"),
+    }
+}
+
+fn feature_chip(label: &str, count: usize, exists: bool) -> StyledCell {
     let text = if count > 0 {
         format!("{label}:{count}")
     } else {
         label.to_string()
     };
     if exists {
-        color(48, &text)
+        styled_color(48, &text)
     } else {
-        color(196, &text)
+        styled_color(196, &text)
+    }
+}
+
+fn join_cells(cells: &[StyledCell], sep: &str) -> StyledCell {
+    StyledCell {
+        raw: cells
+            .iter()
+            .map(|cell| cell.raw.as_str())
+            .collect::<Vec<_>>()
+            .join(sep),
+        styled: cells
+            .iter()
+            .map(|cell| cell.styled.as_str())
+            .collect::<Vec<_>>()
+            .join(sep),
+    }
+}
+
+fn styled_color(ansi: u8, text: &str) -> StyledCell {
+    StyledCell {
+        raw: text.to_string(),
+        styled: color(ansi, text),
+    }
+}
+
+fn styled_dim(text: &str) -> StyledCell {
+    StyledCell {
+        raw: text.to_string(),
+        styled: dim(text),
     }
 }
 
