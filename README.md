@@ -55,6 +55,10 @@ org report [NAME]   # project map grouped by workspace
 org git [NAME]      # detailed local git-state report
 org plug            # Claude/Codex agent plugin carrier report
 org plug --upstream # gh-backed manifest parity + carrier repo git-state verifier
+org fzf             # fuzzy-pick a root/workgroup/project path
+cd (org fzf)        # fish: navigate to the selected path
+eval (org fzf --cd) # fish: same, but emits a cd command
+cd "$(org fzf)"     # POSIX shells
 org intro           # familiarization report: workspaces and short project descriptions
 org list --json
 org work --json     # machine-readable report for dashboards and agents

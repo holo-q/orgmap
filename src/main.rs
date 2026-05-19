@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
 
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -60,6 +62,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Fuzzy-pick an org root, workgroup, or local project path for cd navigation.
+    Fzf {
+        /// Print all selectable rows without launching fzf.
+        #[arg(long)]
+        list: bool,
+        /// Emit a shell-safe `cd <path>` command instead of only the path.
+        #[arg(long)]
+        cd: bool,
+        /// Emit JSON instead of terminal text. With --list, emits every row.
+        #[arg(long)]
+        json: bool,
+    },
     /// Resolve the nearest orgmap identity for a path.
     Identity {
         #[arg(default_value = ".")]
@@ -85,6 +99,14 @@ enum Command {
 #[derive(Debug, Serialize)]
 struct MarkerResult {
     marker: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NavRow {
+    kind: String,
+    name: String,
+    path: PathBuf,
+    detail: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -157,6 +179,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 print_plugin_report(&report);
             }
         }
+        Some(Command::Fzf { list, cd, json }) => {
+            let institution = orgmap::institution::load_current_institution(
+                cli.config.as_deref(),
+                &std::env::current_dir()?,
+            )?;
+            run_fzf(&institution, list, cd, json)?;
+        }
         Some(Command::Identity { path }) => print_json(&orgmap::identity_for_path(&path))?,
         Some(Command::Definition { path }) => print_json(&orgmap::definition_for_path(&path))?,
         Some(Command::Stack { path }) => print_json(&orgmap::discover_workgroup_stack(&path))?,
@@ -196,6 +225,170 @@ fn filtered_institution(
             .count();
     }
     Ok(institution)
+}
+
+fn run_fzf(
+    institution: &orgmap::institution::Institution,
+    list: bool,
+    cd: bool,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rows = nav_rows(institution);
+    if json {
+        if list {
+            print_json(&rows)?;
+            return Ok(());
+        }
+    }
+    if list {
+        for row in &rows {
+            println!("{}", nav_row_line(row));
+        }
+        return Ok(());
+    }
+
+    let selected = select_nav_row(&rows)?;
+    if json {
+        print_json(&selected)?;
+    } else if cd {
+        println!("cd {}", shell_quote(&selected.path));
+    } else {
+        println!("{}", selected.path.display());
+    }
+    Ok(())
+}
+
+fn nav_rows(institution: &orgmap::institution::Institution) -> Vec<NavRow> {
+    let mut rows = Vec::new();
+    rows.push(NavRow {
+        kind: "root".to_string(),
+        name: institution.gh_org.clone(),
+        path: institution.root.clone(),
+        detail: "org root".to_string(),
+    });
+    rows.push(NavRow {
+        kind: "config".to_string(),
+        name: "orgmap.toml".to_string(),
+        path: institution
+            .config_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| institution.root.clone()),
+        detail: display_path(&institution.config_path),
+    });
+    for workspace in institution
+        .workspaces
+        .iter()
+        .filter(|workspace| !workspace.internal)
+    {
+        let Some(path) = &workspace.root else {
+            continue;
+        };
+        rows.push(NavRow {
+            kind: "workgroup".to_string(),
+            name: workspace.key.clone(),
+            path: path.clone(),
+            detail: workspace.display_name.clone(),
+        });
+    }
+    for project in institution
+        .projects
+        .iter()
+        .filter(|project| project.local && !project.blacklisted)
+    {
+        let Some(path) = &project.path else {
+            continue;
+        };
+        rows.push(NavRow {
+            kind: "project".to_string(),
+            name: project.name.clone(),
+            path: path.clone(),
+            detail: format!(
+                "{} {}",
+                project.section,
+                project.description.as_deref().unwrap_or("")
+            )
+            .trim()
+            .to_string(),
+        });
+    }
+    rows.sort_by(|a, b| {
+        nav_kind_rank(&a.kind)
+            .cmp(&nav_kind_rank(&b.kind))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    rows
+}
+
+fn select_nav_row(rows: &[NavRow]) -> Result<NavRow, Box<dyn std::error::Error>> {
+    let mut child = ProcessCommand::new("fzf")
+        .args([
+            "--ansi",
+            "--delimiter",
+            "\t",
+            "--with-nth",
+            "1,2,4,3",
+            "--prompt",
+            "org> ",
+            "--height",
+            "80%",
+            "--reverse",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to launch fzf: {error}"))?;
+
+    {
+        let Some(stdin) = child.stdin.as_mut() else {
+            return Err("failed to open fzf stdin".into());
+        };
+        for row in rows {
+            writeln!(stdin, "{}", nav_row_line(row))?;
+        }
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err("fzf selection cancelled".into());
+    }
+    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let path = selected
+        .split('\t')
+        .nth(2)
+        .ok_or("fzf returned an invalid row")?;
+    rows.iter()
+        .find(|row| row.path == PathBuf::from(path))
+        .cloned()
+        .ok_or_else(|| "selected path no longer exists in nav rows".into())
+}
+
+fn nav_row_line(row: &NavRow) -> String {
+    format!(
+        "{:<9}\t{:<24}\t{}\t{}",
+        row.kind,
+        row.name,
+        row.path.display(),
+        row.detail
+    )
+}
+
+fn nav_kind_rank(kind: &str) -> u8 {
+    match kind {
+        "root" => 0,
+        "config" => 1,
+        "workgroup" => 2,
+        "project" => 3,
+        _ => 4,
+    }
+}
+
+fn shell_quote(path: &Path) -> String {
+    let text = path.display().to_string();
+    if text.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 fn print_org_home(institution: &orgmap::institution::Institution) {
@@ -282,6 +475,14 @@ fn print_command_surface() {
         color_bold(141, "plug"),
         dim("->"),
         dim("agent plugin carriers")
+    );
+    println!(
+        "  {} {} {} {} {}",
+        color_bold(39, "org"),
+        dim("->"),
+        color_bold(75, "fzf"),
+        dim("->"),
+        dim("cd navigation picker")
     );
     println!(
         "  {} {} {} {} {}",
