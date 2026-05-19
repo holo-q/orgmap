@@ -75,6 +75,16 @@ pub struct Institution {
     pub projects: Vec<Project>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct LoadOptions {
+    pub git: bool,
+}
+
+impl LoadOptions {
+    pub const MAP_ONLY: Self = Self { git: false };
+    pub const WITH_GIT: Self = Self { git: true };
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Workspace {
     pub key: String,
@@ -201,6 +211,13 @@ pub fn discover_config_path(location: &Path) -> Option<PathBuf> {
 }
 
 pub fn load_institution(config_path: &Path) -> Result<Institution, Box<dyn std::error::Error>> {
+    load_institution_with_options(config_path, LoadOptions::WITH_GIT)
+}
+
+pub fn load_institution_with_options(
+    config_path: &Path,
+    options: LoadOptions,
+) -> Result<Institution, Box<dyn std::error::Error>> {
     let config_path = canonical_or_self(expand_user_path(config_path));
     let text = std::fs::read_to_string(&config_path)?;
     let config: OrgConfig = toml::from_str(&text)?;
@@ -209,7 +226,7 @@ pub fn load_institution(config_path: &Path) -> Result<Institution, Box<dyn std::
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let local = scan_local_projects(&config);
-    let projects = build_projects(&config, &local);
+    let projects = build_projects(&config, &local, options);
     let workspaces = build_workspaces(&config, &projects);
 
     Ok(Institution {
@@ -230,6 +247,18 @@ pub fn load_current_institution(
         None => discover_config_path(location).ok_or("no root orgmap.toml found")?,
     };
     load_institution(&config_path)
+}
+
+pub fn load_current_institution_with_options(
+    config: Option<&Path>,
+    location: &Path,
+    options: LoadOptions,
+) -> Result<Institution, Box<dyn std::error::Error>> {
+    let config_path = match config {
+        Some(path) => expand_user_path(path),
+        None => discover_config_path(location).ok_or("no root orgmap.toml found")?,
+    };
+    load_institution_with_options(&config_path, options)
 }
 
 pub fn work_report(institution: &Institution) -> WorkReport {
@@ -341,7 +370,7 @@ pub fn configured_orgs(location: &Path) -> Vec<OrgListing> {
     orgs
 }
 
-fn build_projects(config: &OrgConfig, local: &[LocalProject]) -> Vec<Project> {
+fn build_projects(config: &OrgConfig, local: &[LocalProject], options: LoadOptions) -> Vec<Project> {
     let section_entries = section_entries(config);
     let mut rows = BTreeMap::<String, Project>::new();
     let mut section_names = BTreeSet::<String>::new();
@@ -352,7 +381,7 @@ fn build_projects(config: &OrgConfig, local: &[LocalProject]) -> Vec<Project> {
             let local_project = local.iter().find(|project| project.name == entry.name);
             rows.insert(
                 entry.name.clone(),
-                project_from_sources(config, section, Some(entry), local_project),
+                project_from_sources(config, section, Some(entry), local_project, options),
             );
         }
     }
@@ -365,7 +394,7 @@ fn build_projects(config: &OrgConfig, local: &[LocalProject]) -> Vec<Project> {
             .unwrap_or_else(|| local_project.workspace.clone());
         rows.insert(
             local_project.name.clone(),
-            project_from_sources(config, &section, None, Some(local_project)),
+            project_from_sources(config, &section, None, Some(local_project), options),
         );
     }
 
@@ -384,6 +413,7 @@ fn project_from_sources(
     section: &str,
     section_entry: Option<&SectionEntry>,
     local: Option<&LocalProject>,
+    options: LoadOptions,
 ) -> Project {
     let name = section_entry
         .map(|entry| entry.name.as_str())
@@ -422,7 +452,9 @@ fn project_from_sources(
         tagline: override_cfg.and_then(|cfg| cfg.tagline.clone()),
         local: local.is_some(),
         blacklisted: config.scan.blacklist.iter().any(|item| item == name),
-        git: local.map(|project| git_state(&project.path)),
+        git: local
+            .filter(|_| options.git)
+            .map(|project| git_state(&project.path)),
     }
 }
 

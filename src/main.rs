@@ -113,9 +113,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
         None => {
-            let institution = orgmap::institution::load_current_institution(
+            let institution = orgmap::institution::load_current_institution_with_options(
                 cli.config.as_deref(),
                 &std::env::current_dir()?,
+                orgmap::institution::LoadOptions::MAP_ONLY,
             )?;
             print_org_home(&institution);
         }
@@ -140,9 +141,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some(Command::Intro { json }) => {
-            let institution = orgmap::institution::load_current_institution(
+            let institution = orgmap::institution::load_current_institution_with_options(
                 cli.config.as_deref(),
                 &std::env::current_dir()?,
+                orgmap::institution::LoadOptions::MAP_ONLY,
             )?;
             let report = orgmap::institution::intro_report(&institution);
             if json {
@@ -152,7 +154,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some(Command::Report { project, json }) => {
-            let institution = filtered_institution(cli.config.as_deref(), project.as_deref())?;
+            let institution = filtered_institution(
+                cli.config.as_deref(),
+                project.as_deref(),
+                orgmap::institution::LoadOptions::MAP_ONLY,
+            )?;
             if json {
                 print_json(&institution)?;
             } else {
@@ -160,7 +166,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some(Command::Git { project, json }) => {
-            let institution = filtered_institution(cli.config.as_deref(), project.as_deref())?;
+            let institution = filtered_institution(
+                cli.config.as_deref(),
+                project.as_deref(),
+                orgmap::institution::LoadOptions::WITH_GIT,
+            )?;
             if json {
                 print_json(&institution.projects)?;
             } else {
@@ -180,9 +190,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some(Command::Fzf { list, cd, json }) => {
-            let institution = orgmap::institution::load_current_institution(
+            let institution = orgmap::institution::load_current_institution_with_options(
                 cli.config.as_deref(),
                 &std::env::current_dir()?,
+                orgmap::institution::LoadOptions::MAP_ONLY,
             )?;
             run_fzf(&institution, list, cd, json)?;
         }
@@ -204,9 +215,13 @@ fn print_json<T: Serialize>(value: &T) -> serde_json::Result<()> {
 fn filtered_institution(
     config: Option<&std::path::Path>,
     project: Option<&str>,
+    options: orgmap::institution::LoadOptions,
 ) -> Result<orgmap::institution::Institution, Box<dyn std::error::Error>> {
-    let mut institution =
-        orgmap::institution::load_current_institution(config, &std::env::current_dir()?)?;
+    let mut institution = orgmap::institution::load_current_institution_with_options(
+        config,
+        &std::env::current_dir()?,
+        options,
+    )?;
     if let Some(project) = project {
         institution.projects = institution
             .projects
