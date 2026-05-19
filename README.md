@@ -43,16 +43,23 @@ let marker = (org marker . | from json)
 
 ## CLI
 
-Bare `org` lists the user configured organizations. The operational report is
-explicitly `org work`.
+Bare `org` is the operator landing surface for the current institution: it
+prints the active org root, the workgroup structure, and the fluent command
+surface. `org list` remains the configured-institutions registry.
 
 ```sh
-org                 # configured organizations from XDG config and env
-org list            # same list, explicit
+org                 # current org structure + command surface
+org list            # configured organizations from XDG config and env
 org work            # dirty/ahead/no-upstream local project report
+org report [NAME]   # project map grouped by workspace
+org git [NAME]      # detailed local git-state report
+org plug            # Claude/Codex agent plugin carrier report
 org intro           # familiarization report: workspaces and short project descriptions
 org list --json
 org work --json     # machine-readable report for dashboards and agents
+org report --json
+org git --json
+org plug --json
 org intro --json
 org identity .
 org definition .

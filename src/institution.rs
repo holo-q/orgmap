@@ -110,6 +110,7 @@ pub struct GitState {
     pub ahead: Option<usize>,
     pub behind: Option<usize>,
     pub has_upstream: bool,
+    pub age: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -650,6 +651,7 @@ fn git_state(path: &Path) -> GitState {
         ahead: counts.map(|(_, ahead)| ahead),
         behind: counts.map(|(behind, _)| behind),
         has_upstream: counts.is_some(),
+        age: git_output(path, &["log", "-1", "--format=%cr"]).filter(|age| !age.is_empty()),
     }
 }
 
