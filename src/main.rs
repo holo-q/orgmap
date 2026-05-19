@@ -61,6 +61,8 @@ enum Command {
         /// Emit JSON instead of terminal text.
         #[arg(long)]
         json: bool,
+        #[command(subcommand)]
+        command: Option<PlugCommand>,
     },
     /// Fuzzy-pick an org root, workgroup, or local project path for cd navigation.
     Fzf {
@@ -93,6 +95,19 @@ enum Command {
     Marker {
         #[arg(default_value = ".")]
         path: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PlugCommand {
+    /// Verify canonical agent-plugin.toml truth against generated harness manifests.
+    Sync {
+        /// Check disk alignment without writing generated manifests.
+        #[arg(long)]
+        check: bool,
+        /// Reserved for the mutating writer once the verifier is trusted.
+        #[arg(long)]
+        write: bool,
     },
 }
 
@@ -177,16 +192,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 print_git_report(&institution);
             }
         }
-        Some(Command::Plug { upstream, json }) => {
+        Some(Command::Plug {
+            upstream,
+            json,
+            command,
+        }) => {
             let institution = orgmap::institution::load_current_institution(
                 cli.config.as_deref(),
                 &std::env::current_dir()?,
             )?;
-            let report = orgmap::plugin::plugin_report(&institution, upstream);
-            if json {
-                print_json(&report)?;
-            } else {
-                print_plugin_report(&report);
+            match command {
+                Some(PlugCommand::Sync { check: _, write }) => {
+                    if write {
+                        return Err(
+                            "org plug sync --write is not implemented yet; use --check first"
+                                .into(),
+                        );
+                    }
+                    let report = orgmap::plugin::plugin_sync_report(&institution);
+                    if json {
+                        print_json(&report)?;
+                    } else {
+                        print_plugin_sync_report(&report);
+                    }
+                }
+                None => {
+                    let report = orgmap::plugin::plugin_report(&institution, upstream);
+                    if json {
+                        print_json(&report)?;
+                    } else {
+                        print_plugin_report(&report);
+                    }
+                }
             }
         }
         Some(Command::Fzf { list, cd, json }) => {
@@ -760,6 +797,69 @@ fn print_plugin_report(report: &orgmap::plugin::PluginReport) {
     }
 }
 
+fn print_plugin_sync_report(report: &orgmap::plugin::PluginSyncReport) {
+    println!("org plug sync --check — canonical plugin truth");
+    println!(
+        "  {} projects · {} truth files · {} provider manifests",
+        report.projects, report.truth_files, report.provider_manifests
+    );
+    println!(
+        "  {} aligned · {} would write · {} need truth · {} invalid truth",
+        color(48, &report.aligned.to_string()),
+        color(214, &report.would_write.to_string()),
+        color(196, &report.missing_truth.to_string()),
+        color(196, &report.invalid_truth.to_string())
+    );
+    println!();
+    if report.plans.is_empty() {
+        println!("No plugin truth or provider manifests found.");
+        return;
+    }
+
+    let action_w = report
+        .plans
+        .iter()
+        .map(|plan| plugin_sync_action_label(plan.action).raw.len())
+        .max()
+        .unwrap_or(6);
+    let plugin_w = report
+        .plans
+        .iter()
+        .map(|plan| plan.plugin.len())
+        .max()
+        .unwrap_or(6);
+    let host_w = report
+        .plans
+        .iter()
+        .map(|plan| plugin_host_label(plan.host).raw.len())
+        .max()
+        .unwrap_or(4);
+
+    let mut current = "";
+    for plan in &report.plans {
+        if plan.project != current {
+            current = &plan.project;
+            println!("{} {}", dim("──"), color_bold(39, &plan.project));
+        }
+        let action = plugin_sync_action_label(plan.action);
+        let host = plugin_host_label(plan.host);
+        let manifest = plan
+            .manifest
+            .as_ref()
+            .map(|path| display_path(path))
+            .or_else(|| plan.truth.as_ref().map(|path| display_path(path)))
+            .unwrap_or_default();
+        println!(
+            "  {}  {:<plugin_w$}  {}  {:<28}  {}",
+            pad_cell(&action, action_w),
+            plan.plugin,
+            pad_cell(&host, host_w),
+            plan.message,
+            dim(&manifest)
+        );
+    }
+}
+
 struct StyledCell {
     raw: String,
     styled: String,
@@ -808,6 +908,30 @@ fn plugin_report_row(plugin: &orgmap::plugin::PluginSurface) -> PluginReportRow 
         caps: plugin_caps(plugin),
         carrier: plugin_carrier_badge(plugin),
         upstream: plugin_upstream_badge(plugin),
+    }
+}
+
+fn plugin_sync_action_label(action: orgmap::plugin::PluginSyncAction) -> StyledCell {
+    match action {
+        orgmap::plugin::PluginSyncAction::Aligned => styled_color(48, "aligned"),
+        orgmap::plugin::PluginSyncAction::WouldWrite => styled_color(214, "would-write"),
+        orgmap::plugin::PluginSyncAction::MissingManifest => styled_color(214, "missing"),
+        orgmap::plugin::PluginSyncAction::InitTruth => styled_color(196, "init-truth"),
+        orgmap::plugin::PluginSyncAction::InvalidTruth => styled_color(196, "invalid"),
+    }
+}
+
+fn plugin_host_label(host: Option<orgmap::plugin::PluginHost>) -> StyledCell {
+    match host {
+        Some(orgmap::plugin::PluginHost::Claude) => StyledCell {
+            raw: "claude".to_string(),
+            styled: color_bold(214, "claude"),
+        },
+        Some(orgmap::plugin::PluginHost::Codex) => StyledCell {
+            raw: "codex".to_string(),
+            styled: color_bold(48, "codex"),
+        },
+        None => styled_dim("-"),
     }
 }
 

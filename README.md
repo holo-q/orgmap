@@ -55,6 +55,7 @@ org report [NAME]   # project map grouped by workspace
 org git [NAME]      # detailed local git-state report
 org plug            # Claude/Codex agent plugin carrier report
 org plug --upstream # gh-backed manifest parity + carrier repo git-state verifier
+org plug sync --check # verify agent-plugin.toml truth against generated provider manifests
 org fzf             # fuzzy-pick a root/workgroup/project path
 cd (org fzf)        # fish: navigate to the selected path
 eval (org fzf --cd) # fish: same, but emits a cd command
@@ -71,6 +72,52 @@ org definition .
 org stack .
 org marker .
 ```
+
+## Agent Plugin Truth
+
+Agent plugins are defined once in `agent-plugin.toml`. Claude, Codex, and
+future harness manifests are generated surfaces, not source-of-truth files.
+`org plug` still discovers existing `.claude-plugin/plugin.json` and
+`.codex-plugin/plugin.json` files as migration surfaces; `org plug sync --check`
+reports which carriers need canonical TOML and which generated manifests would
+change.
+
+```toml
+[plugin]
+name = "babel"
+version = "0.1.1"
+description = "Babel telemetry, workgroup coordination, and MCP surfaces for agent panes."
+repository = "https://github.com/holo-q/babel.git"
+license = "MIT"
+keywords = ["babel", "telemetry", "workgroup", "mcp", "hsp"]
+category = "development"
+
+[author]
+name = "holo-q"
+
+[capabilities]
+skills = "./skills"
+mcp_servers = "./.mcp.json"
+
+[providers.claude]
+manifest = ".claude-plugin/plugin.json"
+hooks = "./hooks/claude.json"
+
+[providers.codex]
+manifest = ".codex-plugin/plugin.json"
+hooks = "./hooks/codex.json"
+category = "Coding"
+
+[providers.codex.interface]
+displayName = "Babel"
+shortDescription = "Agent pane telemetry and workgroup coordination"
+developerName = "holo-q"
+category = "Coding"
+```
+
+Provider adapters intentionally sit below the TOML model. When a new harness
+arrives, add an emitter for that harness rather than cloning plugin metadata
+across every repo.
 
 Config discovery:
 
