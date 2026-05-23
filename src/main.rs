@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
@@ -96,6 +96,27 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Anti-sloppy screen — scan every local project for secrets, personal
+    /// path/identity leaks, and pre-publish sloppiness. Exits nonzero when
+    /// any Critical or Warn finding lands.
+    Screen {
+        /// Optional project name filter — limit the scan to one project.
+        project: Option<String>,
+        /// Emit JSON instead of terminal text.
+        #[arg(long)]
+        json: bool,
+        /// Skip the gitleaks shell-out even if the binary is on PATH.
+        #[arg(long)]
+        no_gitleaks: bool,
+        /// Only show Critical (secret) findings; suppress pathleak + sloppy.
+        #[arg(long)]
+        secrets_only: bool,
+        /// Force a zero exit code even if Critical/Warn findings exist —
+        /// useful for human-driven exploratory runs where the gating is
+        /// noise.
+        #[arg(long)]
+        no_fail: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -109,6 +130,32 @@ enum PlugCommand {
         #[arg(long)]
         write: bool,
     },
+    /// Dispatch Babel plugin reload signals after plugin definitions are rebuilt.
+    Reload {
+        /// Harness surface to signal.
+        #[arg(long, value_enum, default_value_t = PlugReloadHost::All)]
+        host: PlugReloadHost,
+        /// Trace reason forwarded to Babel.
+        #[arg(long, default_value = "orgmap-plugin-publish")]
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PlugReloadHost {
+    All,
+    Claude,
+    Codex,
+}
+
+impl From<PlugReloadHost> for orgmap::plugin::PluginReloadHost {
+    fn from(host: PlugReloadHost) -> Self {
+        match host {
+            PlugReloadHost::All => Self::All,
+            PlugReloadHost::Claude => Self::Claude,
+            PlugReloadHost::Codex => Self::Codex,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -216,6 +263,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         print_plugin_sync_report(&report);
                     }
                 }
+                Some(PlugCommand::Reload { host, reason }) => {
+                    let report = orgmap::plugin::dispatch_babel_plugin_reload(host.into(), &reason);
+                    if json {
+                        print_json(&report)?;
+                    } else {
+                        print_plugin_reload_report(&report);
+                    }
+                    if report.signals.iter().any(|signal| !signal.ok) {
+                        std::process::exit(1);
+                    }
+                }
                 None => {
                     let report = orgmap::plugin::plugin_report(&institution, upstream);
                     if json {
@@ -240,8 +298,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Marker { path }) => print_json(&MarkerResult {
             marker: orgmap::toml_path_for_path(&path),
         })?,
+        Some(Command::Screen {
+            project,
+            json,
+            no_gitleaks,
+            secrets_only,
+            no_fail,
+        }) => {
+            let institution = filtered_institution(
+                cli.config.as_deref(),
+                project.as_deref(),
+                orgmap::institution::LoadOptions::MAP_ONLY,
+            )?;
+            let opts = orgmap::screen::ScreenOptions {
+                no_gitleaks,
+                secrets_only,
+            };
+            let report = orgmap::screen::run(&institution, &opts);
+            if json {
+                print_json(&report)?;
+            } else {
+                print_screen_report(&report);
+            }
+            if !no_fail && report.exit_code() != 0 {
+                std::process::exit(report.exit_code());
+            }
+        }
     }
     Ok(())
+}
+
+fn print_plugin_reload_report(report: &orgmap::plugin::PluginReloadReport) {
+    println!("org plug reload — Babel plugin reload signal");
+    println!("  reason: {}", dim(&report.reason));
+    for signal in &report.signals {
+        let status = if signal.ok {
+            styled_color(48, "ok")
+        } else {
+            styled_color(196, "failed")
+        };
+        println!(
+            "  {}  {:<6}  {}",
+            status.styled,
+            plugin_host_label(Some(signal.host)).styled,
+            signal.message
+        );
+        if let Some(stderr) = &signal.stderr {
+            println!("      {}", dim(stderr));
+        }
+    }
 }
 
 fn print_json<T: Serialize>(value: &T) -> serde_json::Result<()> {
@@ -535,6 +640,14 @@ fn print_command_surface() {
         color_bold(75, "fzf"),
         dim("->"),
         dim("cd navigation picker")
+    );
+    println!(
+        "  {} {} {} {} {}",
+        color_bold(39, "org"),
+        dim("->"),
+        color_bold(196, "screen"),
+        dim("->"),
+        dim("anti-sloppy normalizer (secrets, paths, dbg!) — pre-publish gate")
     );
     println!(
         "  {} {} {} {} {}",
@@ -982,6 +1095,106 @@ where
         println!("  ... {} more", projects.len() - 24);
     }
     println!();
+}
+
+fn print_screen_report(report: &orgmap::screen::ScreenReport) {
+    println!("{} — {}", color_bold(196, "org screen"), report.gh_org);
+    println!("  root: {}", display_path(&report.root));
+    println!(
+        "  {} scanned · {} skipped · gitleaks: {}",
+        report.projects_scanned,
+        report.projects_skipped,
+        if report.gitleaks_available {
+            color(48, "on")
+        } else {
+            dim("off")
+        }
+    );
+    println!(
+        "  totals: {} · {} · {}",
+        if report.critical > 0 {
+            color_bold(196, &format!("❌ {} secret", report.critical))
+        } else {
+            dim("❌ 0 secret")
+        },
+        if report.warn > 0 {
+            color_bold(214, &format!("⚠️  {} pathleak", report.warn))
+        } else {
+            dim("⚠️  0 pathleak")
+        },
+        if report.info > 0 {
+            color(39, &format!("ℹ️  {} sloppy", report.info))
+        } else {
+            dim("ℹ️  0 sloppy")
+        }
+    );
+    println!();
+
+    let dirty: Vec<&orgmap::screen::ProjectFindings> = report
+        .projects
+        .iter()
+        .filter(|p| p.critical + p.warn + p.info > 0 || p.gitleaks_error.is_some())
+        .collect();
+
+    if dirty.is_empty() {
+        println!("  {}", color_bold(48, "clean — every project passes screen ✔"));
+        return;
+    }
+
+    for pf in &dirty {
+        let badge = format!(
+            "{} {} · {} · {}",
+            color_bold(39, &pf.name),
+            count_badge("❌", pf.critical, 196),
+            count_badge("⚠️", pf.warn, 214),
+            count_badge("ℹ️", pf.info, 39)
+        );
+        println!("{} {}", dim("──"), badge);
+        if let Some(err) = &pf.gitleaks_error {
+            println!("    {} gitleaks: {}", color(196, "!"), err);
+        }
+        let grouped = orgmap::screen::group_by_file(pf);
+        for (file, findings) in &grouped {
+            println!("    {}", color_bold(45, file));
+            for finding in findings {
+                let sev = match finding.severity {
+                    orgmap::screen::Severity::Critical => color_bold(196, "❌ secret  "),
+                    orgmap::screen::Severity::Warn => color_bold(214, "⚠️  pathleak"),
+                    orgmap::screen::Severity::Info => color(39, "ℹ️  sloppy  "),
+                };
+                let src = match finding.source {
+                    orgmap::screen::FindingSource::Pattern => dim(&finding.pattern_id),
+                    orgmap::screen::FindingSource::Gitleaks => color(141, &finding.pattern_id),
+                };
+                println!(
+                    "      {}  {:>4}  {}  {}",
+                    sev,
+                    color(81, &format!("L{}", finding.line)),
+                    src,
+                    dim(&finding.snippet)
+                );
+            }
+        }
+        if pf.truncated > 0 {
+            println!(
+                "    {}",
+                dim(&format!(
+                    "… {} more non-critical findings suppressed (cap {}). Run with `--json` for the full list.",
+                    pf.truncated,
+                    orgmap::screen::MAX_FINDINGS_PER_PROJECT_PUBLIC
+                ))
+            );
+        }
+        println!();
+    }
+}
+
+fn count_badge(glyph: &str, value: usize, ansi: u8) -> String {
+    if value > 0 {
+        color(ansi, &format!("{glyph} {value}"))
+    } else {
+        dim(&format!("{glyph} 0"))
+    }
 }
 
 fn print_intro_report(report: &orgmap::institution::IntroReport) {

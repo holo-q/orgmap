@@ -23,6 +23,47 @@ pub struct OrgConfig {
     pub sections: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub overrides: BTreeMap<String, ProjectOverride>,
+    #[serde(default)]
+    pub screen: ScreenConfig,
+}
+
+/// `[screen]` block in orgmap.toml — anti-sloppy normalizer config. Drives
+/// `org screen`. Pattern set itself is baked into screen.rs; this struct
+/// supplies the user-tunable surface (identity strings, allowlists).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ScreenConfig {
+    /// Absolute path prefixes that count as personal identity leaks when
+    /// they appear in tracked text. Default: `["/home/<user>", "/Users/<user>"]`
+    /// derived from $HOME if empty.
+    #[serde(default)]
+    pub personal_paths: Vec<String>,
+    /// Usernames, handles, and email addresses that should not appear in
+    /// public-shipping text. Free-form substrings.
+    #[serde(default)]
+    pub personal_handles: Vec<String>,
+    /// Per-project allowlist. Keys are project names (matching `orgmap`
+    /// project rows). Values describe what to ignore inside that repo.
+    #[serde(default)]
+    pub allow: BTreeMap<String, ScreenAllow>,
+    /// Org-wide allowlist applied to every project before per-project
+    /// allow lookups.
+    #[serde(default)]
+    pub global_allow: ScreenAllow,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ScreenAllow {
+    /// Repo-relative path prefixes whose findings are suppressed entirely.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// File extensions (with or without leading dot) whose pathleak
+    /// findings are downgraded to advisory — markdown docs reference user
+    /// paths legitimately.
+    #[serde(default)]
+    pub doc_extensions: Vec<String>,
+    /// Pattern IDs to suppress entirely for this scope.
+    #[serde(default)]
+    pub patterns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
