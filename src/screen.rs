@@ -204,12 +204,12 @@ fn build_static_patterns() -> Vec<Pattern> {
 
         // Sloppy — Info
         // Intentionally NOT flagged: console.log (legitimate JS/TS runtime
-        // logger), TODO/FIXME/HACK/XXX (normal engineering markers).
-        // The screen focuses on constructs that are unambiguously
-        // pre-publish concerns, not knowledge-capture comments.
+        // logger), TODO/FIXME/HACK/XXX (normal engineering markers),
+        // localhost URLs (dev/preview tooling, test fixtures, and proxy
+        // configs reference them legitimately). The screen focuses on
+        // constructs that are unambiguously pre-publish concerns.
         ("dbg_macro", Severity::Info, r"\bdbg!\s*\("),
         ("abs_cargo_path", Severity::Info, r#"path\s*=\s*"/(?:home|Users)/"#),
-        ("localhost_url", Severity::Info, r"https?://localhost[:/]"),
     ];
     raw.iter()
         .map(|(id, sev, re)| Pattern {
