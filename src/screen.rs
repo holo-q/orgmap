@@ -203,10 +203,11 @@ fn build_static_patterns() -> Vec<Pattern> {
         ("jwt_token", Severity::Critical, r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),
 
         // Sloppy — Info
+        // Intentionally NOT flagged: console.log (legitimate JS/TS runtime
+        // logger), TODO/FIXME/HACK/XXX (normal engineering markers).
+        // The screen focuses on constructs that are unambiguously
+        // pre-publish concerns, not knowledge-capture comments.
         ("dbg_macro", Severity::Info, r"\bdbg!\s*\("),
-        ("console_log", Severity::Info, r"\bconsole\.log\s*\("),
-        ("xxx_marker", Severity::Info, r"\bXXX\b"),
-        ("todo_rip", Severity::Info, r"(?i)(TODO|FIXME|HACK)[^\n]{0,80}\b(rip|remove|temp|hack)"),
         ("abs_cargo_path", Severity::Info, r#"path\s*=\s*"/(?:home|Users)/"#),
         ("localhost_url", Severity::Info, r"https?://localhost[:/]"),
     ];
