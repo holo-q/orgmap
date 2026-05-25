@@ -17,11 +17,22 @@
 //! [observe]
 //! mode = "subtree"          # subtree | exact | network
 //! roots = ["../sibling"]    # extra roots when mode = "network"
+//!
+//! [scope]
+//! build = true              # this node is the build-gate boundary; swallows
+//!                           # every project beneath it into one gate unit
 //! ```
 //!
 //! The protocol deliberately separates identity from liveness. Babel resolves
 //! workgroup identity before paint events; panels consume the resolved
 //! `workgroup_*` fields and keep animation/ring/outline for session state.
+//!
+//! It also separates identity from *concern boundaries*. A workgroup is a
+//! group/identity mark, but "what root owns concern X here" is a per-[`Facet`]
+//! question answered by [`boundary`] — builds bound at the nearest project by
+//! default, group/presence at the nearest workgroup, and `[scope]` declarations
+//! override per facet (innermost-wins). New concerns become new facets, not new
+//! special cases.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -35,6 +46,13 @@ pub const ORGMAP_FILE: &str = "orgmap.toml";
 pub const WORKGROUP_FILE: &str = "workgroup.toml";
 pub const HSP_WORKGROUP_FILE: &str = ".hsp/workgroup.toml";
 pub const WORKGROUP_MARKERS: &[&str] = &[ORGMAP_FILE, WORKGROUP_FILE, HSP_WORKGROUP_FILE];
+
+/// Structural signals that a directory is a buildable repo root. These define
+/// the *implicit* `Build` facet boundary (the default gate unit) for any
+/// directory that carries no explicit `[scope]` declaration — see [`boundary`].
+/// A project is "an implicit workgroup with build-scoping but not
+/// group-scoping": it bounds builds without forming a presence/identity group.
+pub const PROJECT_MARKERS: &[&str] = &[".git", "Cargo.toml", "pyproject.toml", "package.json"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum WorkgroupLevel {
@@ -89,6 +107,50 @@ impl ObservationMode {
     }
 }
 
+/// A *concern* whose grouping boundary the org tree can answer for any path.
+///
+/// The org tree is one structure; different concerns bound at different
+/// granularities. Rather than each consumer re-deriving "what root owns my
+/// concern here" (the historical bodge — build gates reached for `workspace_root`,
+/// presence hand-rolled [`ObservationMode`]), every concern names its facet and
+/// asks [`boundary`]. New concerns are a new variant + a default floor, never a
+/// new special case threaded through the bus.
+///
+/// `Presence` is reserved: it is `ObservationMode` + `observation_roots` waiting
+/// to be folded into the same resolver. Until then it falls back to `Group`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Facet {
+    /// The team room: presence, ticket visibility, identity (color/icon/name).
+    /// Boundary = the nearest workgroup marker. Workgroups are *always* group
+    /// boundaries — that is what a workgroup structurally is.
+    Group,
+    /// The build-gate unit: who must wait on whom before a build runs.
+    /// Default boundary = the nearest structural project ([`PROJECT_MARKERS`]).
+    /// An explicit `[scope] build` declaration overrides, innermost-wins, so a
+    /// workgroup can *swallow* its projects into one unit and a project can
+    /// *re-assert* itself out of a swallowing ancestor.
+    Build,
+    /// Reserved — see type docs. Resolves as `Group` until observation folds in.
+    Presence,
+}
+
+/// Per-facet boundary declarations parsed from a node's `[scope]` table. Absent
+/// keys mean "no opinion" — the facet falls to its default floor. This is the
+/// extensible facet-map: a new facet is a new optional field here, not a new
+/// `*_scope` key smeared across the schema.
+///
+/// ```toml
+/// [scope]
+/// build = true   # this node is the build-gate boundary; swallows everything beneath
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ScopeDecls {
+    /// `Some(true)` — this node IS the build boundary (innermost such wins).
+    /// `Some(false)` — explicitly NOT a boundary; defer the build unit upward.
+    /// `None` — no opinion; structural project-marker status (if any) stands.
+    pub build: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkgroupDefinition {
     pub root: PathBuf,
@@ -100,6 +162,8 @@ pub struct WorkgroupDefinition {
     pub ansi256: Option<u8>,
     pub observation_mode: ObservationMode,
     pub observation_roots: Vec<PathBuf>,
+    /// Explicit per-facet boundary declarations from the `[scope]` table.
+    pub scope: ScopeDecls,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -154,6 +218,58 @@ pub fn toml_path_for_path(path: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Resolve the boundary root that owns `facet` at `path` — the one entry point
+/// every bus concern uses instead of reaching for an accidental `workspace_root`
+/// or hand-rolling its own tree walk. See [`Facet`] for per-facet semantics.
+pub fn boundary(path: &Path, facet: Facet) -> PathBuf {
+    let path = normalize_scope_path(path);
+    match facet {
+        // Presence is the reserved future fold of ObservationMode; until then it
+        // shares the group boundary (the nearest workgroup).
+        Facet::Group | Facet::Presence => definition_for_path(&path)
+            .map(|definition| definition.root)
+            .unwrap_or(path),
+        Facet::Build => build_boundary(&path),
+    }
+}
+
+/// `Build`-facet resolution, walking innermost → outermost:
+/// - innermost explicit `[scope] build = true` wins — this is both *swallow*
+///   (a workgroup claiming its subtree) and *re-assert* (a project claiming
+///   itself back out of a swallowing ancestor); whichever is encountered first
+///   from the build location is the unit,
+/// - `build = false` opts a node out, deferring the unit upward,
+/// - with no explicit declaration in the stack, the nearest structural project
+///   ([`PROJECT_MARKERS`]) is the floor — the implicit project boundary,
+/// - and failing even that, the path stands as its own boundary.
+fn build_boundary(path: &Path) -> PathBuf {
+    let mut project_floor: Option<PathBuf> = None;
+    for ancestor in path.ancestors() {
+        let declared = workgroup_marker(ancestor)
+            .and_then(|marker| read_definition(ancestor, marker))
+            .and_then(|definition| definition.scope.build);
+        match declared {
+            Some(true) => return canonical_or_self(ancestor.to_path_buf()),
+            Some(false) => continue,
+            None => {
+                if project_floor.is_none() && is_project_root(ancestor) {
+                    project_floor = Some(canonical_or_self(ancestor.to_path_buf()));
+                }
+            }
+        }
+    }
+    project_floor.unwrap_or_else(|| path.to_path_buf())
+}
+
+/// True when a directory carries a structural build-system marker
+/// ([`PROJECT_MARKERS`]) — the implicit `Build` boundary signal that makes a
+/// plain repo its own build-gate unit without declaring anything.
+pub fn is_project_root(path: &Path) -> bool {
+    PROJECT_MARKERS
+        .iter()
+        .any(|marker| path.join(marker).exists())
 }
 
 pub fn default_workgroup_icon() -> String {
@@ -242,7 +358,19 @@ fn read_definition(root: &Path, marker: PathBuf) -> Option<WorkgroupDefinition> 
         ansi256,
         observation_mode: observation_mode(table, observe),
         observation_roots: observation_roots(root, table, observe),
+        scope: scope_decls(value.get("scope"), table),
     })
+}
+
+/// Parse the `[scope]` facet-map. Primary source is the dedicated `[scope]`
+/// table; `build_scope` in the `[workgroup]` table is accepted as a terse
+/// flat alias so a one-liner override doesn't force a second table header.
+fn scope_decls(scope: Option<&toml::Value>, table: &toml::Value) -> ScopeDecls {
+    let build = scope
+        .and_then(|scope| scope.get("build"))
+        .or_else(|| table.get("build_scope"))
+        .and_then(toml::Value::as_bool);
+    ScopeDecls { build }
 }
 
 fn first_string(value: &toml::Value, keys: &[&str]) -> Option<String> {
@@ -533,6 +661,120 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    /// Default floor: a build under a plain workgroup resolves to its own
+    /// project — gates are project-scoped without anyone declaring anything.
+    #[test]
+    fn build_facet_defaults_to_nearest_project() {
+        let root = tmp_root("build-default");
+        let workgroup = root.join("repo-os");
+        let project = workgroup.join("babel");
+        let src = project.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            workgroup.join(WORKGROUP_FILE),
+            "[workgroup]\nname = \"repo-os\"\nlevel = \"domain\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+
+        let resolved = boundary(&src, Facet::Build);
+        let expected = canonical_or_self(project.clone());
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(resolved, expected);
+    }
+
+    /// `[scope] build = true` on the workgroup swallows its projects: a build in
+    /// any child resolves to the workgroup, so the whole subtree gates as one.
+    #[test]
+    fn workgroup_scope_build_swallows_projects() {
+        let root = tmp_root("build-swallow");
+        let workgroup = root.join("repo-os");
+        let babel = workgroup.join("babel");
+        let src = babel.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            workgroup.join(WORKGROUP_FILE),
+            "[workgroup]\nname = \"repo-os\"\nlevel = \"domain\"\n\n[scope]\nbuild = true\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(babel.join(".git")).unwrap();
+
+        let resolved = boundary(&src, Facet::Build);
+        let expected = canonical_or_self(workgroup.clone());
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(resolved, expected, "swallowing workgroup is the build boundary");
+    }
+
+    /// Innermost-explicit-wins: a project re-declaring `build = true` claims
+    /// itself back out of a swallowing ancestor.
+    #[test]
+    fn project_reasserts_out_of_swallow() {
+        let root = tmp_root("build-reassert");
+        let workgroup = root.join("repo-os");
+        let babel = workgroup.join("babel");
+        let src = babel.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            workgroup.join(WORKGROUP_FILE),
+            "[workgroup]\nname = \"repo-os\"\n\n[scope]\nbuild = true\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(babel.join(".hsp")).unwrap();
+        std::fs::write(
+            babel.join(HSP_WORKGROUP_FILE),
+            "[workgroup]\nname = \"babel\"\nlevel = \"project\"\n\n[scope]\nbuild = true\n",
+        )
+        .unwrap();
+
+        let resolved = boundary(&src, Facet::Build);
+        let expected = canonical_or_self(babel.clone());
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(resolved, expected, "innermost explicit declaration wins");
+    }
+
+    /// `build = false` opts a project out of being its own unit, deferring the
+    /// build boundary up to the swallowing parent.
+    #[test]
+    fn scope_build_false_defers_upward() {
+        let root = tmp_root("build-optout");
+        let workgroup = root.join("repo-os");
+        let babel = workgroup.join("babel");
+        let src = babel.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            workgroup.join(WORKGROUP_FILE),
+            "[workgroup]\nname = \"repo-os\"\n\n[scope]\nbuild = true\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(babel.join(".git")).unwrap();
+        std::fs::write(
+            babel.join(WORKGROUP_FILE),
+            "[workgroup]\nname = \"babel\"\n\n[scope]\nbuild = false\n",
+        )
+        .unwrap();
+
+        let resolved = boundary(&src, Facet::Build);
+        let expected = canonical_or_self(workgroup.clone());
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(resolved, expected, "build=false defers the unit to the parent");
+    }
+
+    /// The terse flat alias `build_scope = true` in `[workgroup]` parses the
+    /// same as the `[scope]` table — a one-liner override needs no second header.
+    #[test]
+    fn flat_build_scope_alias_parses() {
+        let root = tmp_root("build-flat-alias");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(
+            root.join(WORKGROUP_FILE),
+            "[workgroup]\nname = \"mono\"\nbuild_scope = true\n",
+        )
+        .unwrap();
+        let definition = definition_for_path(&root.join("sub")).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(definition.scope.build, Some(true));
     }
 
     #[test]

@@ -105,6 +105,21 @@ pub struct PluginSyncReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PluginReloadReport {
+    pub reason: String,
+    pub signals: Vec<PluginReloadSignal>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginReloadSignal {
+    pub host: PluginHost,
+    pub harness: String,
+    pub ok: bool,
+    pub message: String,
+    pub stderr: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PluginSyncPlan {
     pub project: String,
     pub workspace: String,
@@ -123,6 +138,13 @@ pub enum PluginSyncAction {
     MissingManifest,
     InitTruth,
     InvalidTruth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginReloadHost {
+    All,
+    Claude,
+    Codex,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -308,6 +330,17 @@ pub fn plugin_sync_report(institution: &Institution) -> PluginSyncReport {
     }
 }
 
+pub fn dispatch_babel_plugin_reload(host: PluginReloadHost, reason: &str) -> PluginReloadReport {
+    let signals = plugin_reload_hosts(host)
+        .into_iter()
+        .map(|host| dispatch_babel_reload_for_host(host, reason))
+        .collect();
+    PluginReloadReport {
+        reason: reason.to_string(),
+        signals,
+    }
+}
+
 fn plugin_surfaces(project: &Project, org: &str, verify_upstream: bool) -> Vec<PluginSurface> {
     let Some(path) = &project.path else {
         return Vec::new();
@@ -316,6 +349,48 @@ fn plugin_surfaces(project: &Project, org: &str, verify_upstream: bool) -> Vec<P
         .into_iter()
         .map(|(host, manifest)| plugin_surface(project, org, host, manifest, verify_upstream))
         .collect()
+}
+
+fn plugin_reload_hosts(host: PluginReloadHost) -> Vec<PluginHost> {
+    match host {
+        PluginReloadHost::All => vec![PluginHost::Codex, PluginHost::Claude],
+        PluginReloadHost::Claude => vec![PluginHost::Claude],
+        PluginReloadHost::Codex => vec![PluginHost::Codex],
+    }
+}
+
+fn dispatch_babel_reload_for_host(host: PluginHost, reason: &str) -> PluginReloadSignal {
+    let harness = match host {
+        PluginHost::Claude => "claude",
+        PluginHost::Codex => "codex",
+    };
+    let output = Command::new("babel")
+        .args(["plugin", "reload", harness, "--reason", reason, "--json"])
+        .output();
+    match output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            PluginReloadSignal {
+                host,
+                harness: harness.to_string(),
+                ok: output.status.success(),
+                message: if stdout.is_empty() {
+                    format!("babel plugin reload {harness} exited {}", output.status)
+                } else {
+                    stdout
+                },
+                stderr: (!stderr.is_empty()).then_some(stderr),
+            }
+        }
+        Err(error) => PluginReloadSignal {
+            host,
+            harness: harness.to_string(),
+            ok: false,
+            message: format!("failed to execute babel plugin reload {harness}: {error}"),
+            stderr: None,
+        },
+    }
 }
 
 fn project_sync_plans(project: &Project, path: &Path) -> Vec<PluginSyncPlan> {
