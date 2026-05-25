@@ -241,11 +241,19 @@ pub fn boundary(path: &Path, facet: Facet) -> PathBuf {
 ///   itself back out of a swallowing ancestor); whichever is encountered first
 ///   from the build location is the unit,
 /// - `build = false` opts a node out, deferring the unit upward,
-/// - with no explicit declaration in the stack, the nearest structural project
-///   ([`PROJECT_MARKERS`]) is the floor — the implicit project boundary,
+/// - with no explicit declaration, the floor is the nearest **git repository
+///   root** — in this org a *project* is a git repo, and a cargo/uv workspace's
+///   member crates (each with their own `Cargo.toml`/`pyproject.toml` but no
+///   `.git`) are internal sub-units that share one compile graph, so they must
+///   gate as the repo, not fragment per-member,
+/// - failing a `.git` ancestor, the nearest other structural marker
+///   ([`PROJECT_MARKERS`]) is the fallback (uncommitted scaffolding),
 /// - and failing even that, the path stands as its own boundary.
 fn build_boundary(path: &Path) -> PathBuf {
-    let mut project_floor: Option<PathBuf> = None;
+    // `.git` is the truthful project signal; other markers are a weaker
+    // fallback so a member `Cargo.toml` never out-votes its enclosing repo.
+    let mut git_floor: Option<PathBuf> = None;
+    let mut marker_floor: Option<PathBuf> = None;
     for ancestor in path.ancestors() {
         let declared = workgroup_marker(ancestor)
             .and_then(|marker| read_definition(ancestor, marker))
@@ -254,13 +262,18 @@ fn build_boundary(path: &Path) -> PathBuf {
             Some(true) => return canonical_or_self(ancestor.to_path_buf()),
             Some(false) => continue,
             None => {
-                if project_floor.is_none() && is_project_root(ancestor) {
-                    project_floor = Some(canonical_or_self(ancestor.to_path_buf()));
+                if git_floor.is_none() && ancestor.join(".git").exists() {
+                    git_floor = Some(canonical_or_self(ancestor.to_path_buf()));
+                }
+                if marker_floor.is_none() && is_project_root(ancestor) {
+                    marker_floor = Some(canonical_or_self(ancestor.to_path_buf()));
                 }
             }
         }
     }
-    project_floor.unwrap_or_else(|| path.to_path_buf())
+    git_floor
+        .or(marker_floor)
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 /// True when a directory carries a structural build-system marker
@@ -683,6 +696,26 @@ mod tests {
         let expected = canonical_or_self(project.clone());
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(resolved, expected);
+    }
+
+    /// A cargo/uv workspace member (its own `Cargo.toml`, no `.git`) resolves to
+    /// the enclosing git repo, not the member — members share one compile graph
+    /// and must gate as the project, not fragment per-crate.
+    #[test]
+    fn build_facet_climbs_past_workspace_members_to_git_repo() {
+        let root = tmp_root("build-workspace-member");
+        let repo = root.join("hsp");
+        let member = repo.join("crates").join("hsp-bus");
+        let src = member.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(member.join("Cargo.toml"), "[package]\nname = \"hsp-bus\"\n").unwrap();
+
+        let resolved = boundary(&src, Facet::Build);
+        let expected = canonical_or_self(repo.clone());
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(resolved, expected, "member crate gates as the git repo");
     }
 
     /// `[scope] build = true` on the workgroup swallows its projects: a build in
