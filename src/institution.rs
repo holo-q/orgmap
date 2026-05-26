@@ -64,6 +64,13 @@ pub struct ScreenConfig {
     /// own scripts, never in orgmap core.
     #[serde(default, rename = "screener")]
     pub screeners: Vec<ScreenScreener>,
+    /// Directories globbed for screener scripts (Lane B convenience). Every
+    /// executable file found becomes an `orgmap`-adapter screener named after
+    /// its file stem, invoked as `script {project}` — drop a script in, it
+    /// runs. Paths support `{org_root}` and are taken relative to the org root
+    /// otherwise. Explicit `[[screen.screener]]` entries win on name collision.
+    #[serde(default)]
+    pub screener_dirs: Vec<String>,
 }
 
 /// One org-defined declarative pattern (Lane A). Regex-only and

@@ -87,6 +87,23 @@ error (today's `gitleaks_error`, generalized to `screener_errors[name]`).
 Screeners run only on git-tracked projects — the scan early-returns on a
 non-git tree, so a `requires` gate would be dead config; it's structural.
 
+### Directory auto-discovery (`screener_dirs`)
+
+Listing each script as a `[[screen.screener]]` block gets tedious once an org
+has several. `screener_dirs` globs a directory instead — every executable file
+becomes an `orgmap`-adapter screener named after its file stem, invoked as
+`script {project}` with cwd set to the project. Drop a script in, it runs.
+
+```toml
+[screen]
+screener_dirs = ["tooling/screeners"]   # relative to org root, or {org_root}/...
+```
+
+Non-executable files (READMEs, fixtures) are ignored; explicit
+`[[screen.screener]]` entries win on a name collision; gitleaks still
+auto-injects last. This is the ergonomic holoq itself uses — its `modrs-purity`
+roof-law screener lives in `tooling/screeners/` and registers with one line.
+
 ### The orgmap finding protocol (`adapter = "orgmap"`)
 
 A custom screener prints **NDJSON to stdout**, one finding per line:

@@ -727,19 +727,79 @@ impl Screener {
 /// gitleaks screener unless config already declares one named "gitleaks"
 /// (lets an org redefine it). To disable gitleaks entirely, pass
 /// `--skip-screener gitleaks`.
-fn build_screeners(cfg: &ScreenConfig) -> Vec<Screener> {
+fn build_screeners(cfg: &ScreenConfig, org_root: &Path) -> Vec<Screener> {
     let mut out: Vec<Screener> = cfg.screeners.iter().map(Screener::from_config).collect();
+    // Dir-discovered screeners: every executable in a screener_dir becomes an
+    // orgmap-adapter screener named after its file stem. Explicit
+    // [[screen.screener]] entries win on name collision; gitleaks injects last.
+    for dir in &cfg.screener_dirs {
+        for screener in discover_screener_dir(dir, org_root) {
+            if !out.iter().any(|s| s.name == screener.name) {
+                out.push(screener);
+            }
+        }
+    }
     if !out.iter().any(|s| s.name == "gitleaks") {
         out.push(Screener::builtin_gitleaks());
     }
     out
 }
 
+/// Glob a directory for executable screener scripts (the `screener_dirs`
+/// convenience). Each becomes an orgmap-adapter screener named after its file
+/// stem, invoked as `script {project}` with cwd set to the project.
+/// Non-executables (READMEs, etc.) and unreadable dirs are silently ignored.
+fn discover_screener_dir(dir: &str, org_root: &Path) -> Vec<Screener> {
+    let resolved = dir.replace("{org_root}", &org_root.display().to_string());
+    let base = {
+        let p = Path::new(&resolved);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            org_root.join(p)
+        }
+    };
+    let Ok(entries) = std::fs::read_dir(&base) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    paths.sort(); // deterministic registration order
+    let mut out = Vec::new();
+    for p in paths {
+        if !is_executable_file(&p) {
+            continue;
+        }
+        let Some(name) = p.file_stem().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        out.push(Screener {
+            name: name.to_string(),
+            command: p.display().to_string(),
+            args: vec!["{project}".to_string()],
+            adapter: Adapter::Orgmap,
+            optional: false,
+            severity: Severity::Warn,
+        });
+    }
+    out
+}
+
+fn is_executable_file(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(p) {
+        Ok(m) => m.is_file() && (m.permissions().mode() & 0o111 != 0),
+        Err(_) => false,
+    }
+}
+
 /// The screeners that will actually run: registry minus `--skip-screener`'d
 /// names, minus optional screeners whose command can't be found. Shared by
 /// `run` and `active_screeners` so the resolution rule lives in one place.
 fn resolve_screeners(cfg: &ScreenConfig, org_root: &Path, opts: &ScreenOptions) -> Vec<Screener> {
-    build_screeners(cfg)
+    build_screeners(cfg, org_root)
         .into_iter()
         .filter(|s| !opts.skip_screeners.iter().any(|n| n == &s.name))
         .filter(|s| command_resolves(&s.command, org_root) || !s.optional)
