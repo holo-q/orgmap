@@ -105,9 +105,16 @@ enum Command {
         /// Emit JSON instead of terminal text.
         #[arg(long)]
         json: bool,
-        /// Skip the gitleaks shell-out even if the binary is on PATH.
+        /// Skip a registered screener by name (repeatable), e.g.
+        /// `--skip-screener gitleaks`.
+        #[arg(long = "skip-screener", value_name = "NAME")]
+        skip_screener: Vec<String>,
+        /// Back-compat alias for `--skip-screener gitleaks`.
         #[arg(long)]
         no_gitleaks: bool,
+        /// List the screeners that would run (built-in + configured) and exit.
+        #[arg(long)]
+        list_screeners: bool,
         /// Only show Critical (secret) findings; suppress pathleak + sloppy.
         #[arg(long)]
         secrets_only: bool,
@@ -301,7 +308,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Screen {
             project,
             json,
+            skip_screener,
             no_gitleaks,
+            list_screeners,
             secrets_only,
             no_fail,
         }) => {
@@ -310,10 +319,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 project.as_deref(),
                 orgmap::institution::LoadOptions::MAP_ONLY,
             )?;
+            let mut skip_screeners = skip_screener;
+            if no_gitleaks {
+                skip_screeners.push("gitleaks".to_string());
+            }
             let opts = orgmap::screen::ScreenOptions {
-                no_gitleaks,
+                skip_screeners,
                 secrets_only,
             };
+            // `--list-screeners` resolves the registry without scanning.
+            if list_screeners {
+                let active = orgmap::screen::active_screeners(&institution, &opts);
+                println!("{} — screeners that would run", color_bold(196, "org screen"));
+                if active.is_empty() {
+                    println!("  {}", dim("none"));
+                } else {
+                    for name in &active {
+                        println!("  {}", color(48, name));
+                    }
+                }
+                return Ok(());
+            }
             let report = orgmap::screen::run(&institution, &opts);
             if json {
                 print_json(&report)?;
@@ -1101,13 +1127,13 @@ fn print_screen_report(report: &orgmap::screen::ScreenReport) {
     println!("{} — {}", color_bold(196, "org screen"), report.gh_org);
     println!("  root: {}", display_path(&report.root));
     println!(
-        "  {} scanned · {} skipped · gitleaks: {}",
+        "  {} scanned · {} skipped · screeners: {}",
         report.projects_scanned,
         report.projects_skipped,
-        if report.gitleaks_available {
-            color(48, "on")
+        if report.screeners_active.is_empty() {
+            dim("none")
         } else {
-            dim("off")
+            color(48, &report.screeners_active.join(", "))
         }
     );
     println!(
@@ -1133,7 +1159,7 @@ fn print_screen_report(report: &orgmap::screen::ScreenReport) {
     let dirty: Vec<&orgmap::screen::ProjectFindings> = report
         .projects
         .iter()
-        .filter(|p| p.critical + p.warn + p.info > 0 || p.gitleaks_error.is_some())
+        .filter(|p| p.critical + p.warn + p.info > 0 || !p.screener_errors.is_empty())
         .collect();
 
     if dirty.is_empty() {
@@ -1150,8 +1176,8 @@ fn print_screen_report(report: &orgmap::screen::ScreenReport) {
             count_badge("ℹ️", pf.info, 39)
         );
         println!("{} {}", dim("──"), badge);
-        if let Some(err) = &pf.gitleaks_error {
-            println!("    {} gitleaks: {}", color(196, "!"), err);
+        for (name, err) in &pf.screener_errors {
+            println!("    {} {}: {}", color(196, "!"), name, err);
         }
         let grouped = orgmap::screen::group_by_file(pf);
         for (file, findings) in &grouped {
@@ -1162,9 +1188,9 @@ fn print_screen_report(report: &orgmap::screen::ScreenReport) {
                     orgmap::screen::Severity::Warn => color_bold(214, "⚠️  pathleak"),
                     orgmap::screen::Severity::Info => color(39, "ℹ️  sloppy  "),
                 };
-                let src = match finding.source {
+                let src = match &finding.source {
                     orgmap::screen::FindingSource::Pattern => dim(&finding.pattern_id),
-                    orgmap::screen::FindingSource::Gitleaks => color(141, &finding.pattern_id),
+                    orgmap::screen::FindingSource::Screener(_) => color(141, &finding.pattern_id),
                 };
                 println!(
                     "      {}  {:>4}  {}  {}",

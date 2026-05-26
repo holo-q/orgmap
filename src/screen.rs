@@ -9,9 +9,12 @@
 //!   - PathLeak (Warn)      `/home/<user>`, personal handles, emails
 //!   - Sloppy   (Info)      dbg!/console.log/XXX/hardcoded localhost
 //!
-//! When `gitleaks` is on $PATH and `--no-gitleaks` was not passed, the
-//! gitleaks `detect` results are merged in as additional Critical findings —
-//! orthogonal coverage on top of the baked-in patterns.
+//! Beyond the baked universal patterns, orgs extend the screen two ways
+//! (see docs/screen-extensibility.md): declarative `[[screen.pattern]]`
+//! regexes (Lane A), and `[[screen.screener]]` external commands whose
+//! findings are ingested via an adapter (Lane B). gitleaks is the first
+//! built-in screener — auto-registered when present, NOT a special case in
+//! the engine.
 //!
 //! Allowlisting goes through `[screen]` in orgmap.toml:
 //!   - personal_paths       — what counts as a path leak
@@ -27,7 +30,7 @@ use std::process::Command;
 use regex::Regex;
 use serde::Serialize;
 
-use crate::institution::{Institution, Project, ScreenAllow, ScreenConfig};
+use crate::institution::{Institution, Project, ScreenAllow, ScreenConfig, ScreenScreener};
 
 /// Cap on file size we'll scan. Files above this skip — secrets in
 /// multi-MB blobs are vanishingly rare and reading them stalls the walk.
@@ -110,11 +113,14 @@ pub struct Finding {
     pub source: FindingSource,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FindingSource {
+    /// A baked-in or org-declared regex pattern matched the line.
     Pattern,
-    Gitleaks,
+    /// An external screener (Lane B) produced this finding; carries the
+    /// screener's name for provenance + report labeling. gitleaks is one such.
+    Screener(String),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -132,11 +138,11 @@ pub struct ProjectFindings {
     /// the repo committed `target/`, `node_modules/`, etc. Their presence
     /// is a hygiene finding even though we don't scan them.
     pub tracked_build_artifacts: usize,
-    /// Set when gitleaks was supposed to run for this project but bailed
-    /// (binary not found, non-git tree, gitleaks itself errored). Surfaces
-    /// in the terminal report so a clean scan can't be confused with a
-    /// silent skip.
-    pub gitleaks_error: Option<String>,
+    /// Per-screener errors (keyed by screener name) for screeners that were
+    /// supposed to run for this project but bailed (binary errored, bad
+    /// output, nonzero exit). Surfaces in the terminal report so a clean scan
+    /// can't be confused with a silent skip.
+    pub screener_errors: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -148,7 +154,9 @@ pub struct ScreenReport {
     pub critical: usize,
     pub warn: usize,
     pub info: usize,
-    pub gitleaks_available: bool,
+    /// Names of the screeners (Lane B) that resolved and ran this pass —
+    /// built-in + configured, minus `--skip-screener` and missing-optional.
+    pub screeners_active: Vec<String>,
     pub projects: Vec<ProjectFindings>,
 }
 
@@ -162,29 +170,27 @@ impl ScreenReport {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ScreenOptions {
-    /// When true, skip the gitleaks shell-out even if the binary is present.
-    pub no_gitleaks: bool,
+    /// Screener names to skip this run (`--skip-screener`, plus the
+    /// `--no-gitleaks` alias which pushes "gitleaks").
+    pub skip_screeners: Vec<String>,
     /// When true, only emit Critical findings (silence pathleak + sloppy).
     pub secrets_only: bool,
 }
 
-impl Default for ScreenOptions {
-    fn default() -> Self {
-        Self {
-            no_gitleaks: false,
-            secrets_only: false,
-        }
-    }
-}
-
-/// Baked-in pattern definition. The id is the stable handle used by
-/// allowlists.
+/// A compiled screening pattern. `id` is the stable handle used by
+/// allowlists; baked-in patterns and org-declared `[[screen.pattern]]`
+/// entries share this shape.
 struct Pattern {
-    id: &'static str,
+    id: String,
     severity: Severity,
     regex: Regex,
+    /// Downgrade a `Warn` match to `Info` inside doc files. Universal
+    /// pathleak patterns set this; secrets (Critical) ignore it.
+    docs_downgrade: bool,
+    /// Survive the `--secrets-only` gate even when not `Critical`.
+    secrets_only_survives: bool,
 }
 
 fn build_static_patterns() -> Vec<Pattern> {
@@ -213,11 +219,27 @@ fn build_static_patterns() -> Vec<Pattern> {
     ];
     raw.iter()
         .map(|(id, sev, re)| Pattern {
-            id,
+            id: id.to_string(),
             severity: *sev,
             regex: Regex::new(re).expect("baked-in screen regex must compile"),
+            // Universal behavior: Warn-tier leaks downgrade to advisory in
+            // docs; nothing baked survives --secrets-only except by being
+            // Critical (which the gate already lets through).
+            docs_downgrade: *sev == Severity::Warn,
+            secrets_only_survives: false,
         })
         .collect()
+}
+
+/// Parse a config severity string into a `Severity`, defaulting unknown/empty
+/// to `Warn`. Accepts the tier labels as aliases so config can say either
+/// `critical` or `secret`.
+fn severity_from_str(s: &str) -> Severity {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "critical" | "secret" | "error" => Severity::Critical,
+        "info" | "sloppy" | "advisory" => Severity::Info,
+        _ => Severity::Warn,
+    }
 }
 
 /// Patterns derived at runtime from `[screen].personal_paths` and
@@ -249,9 +271,11 @@ fn build_dynamic_patterns(cfg: &ScreenConfig) -> Vec<Pattern> {
                 // Leak strings collapse into one shared id so allowlists
                 // address "all personal-path findings" without listing each
                 // path. Same shape for handles below.
-                id: "personal_path",
+                id: "personal_path".to_string(),
                 severity: Severity::Warn,
                 regex,
+                docs_downgrade: true,
+                secrets_only_survives: false,
             });
         }
     }
@@ -262,10 +286,34 @@ fn build_dynamic_patterns(cfg: &ScreenConfig) -> Vec<Pattern> {
         }
         if let Ok(regex) = Regex::new(&regex::escape(handle)) {
             out.push(Pattern {
-                id: "personal_handle",
+                id: "personal_handle".to_string(),
                 severity: Severity::Warn,
                 regex,
+                docs_downgrade: true,
+                secrets_only_survives: false,
             });
+        }
+    }
+
+    // Lane A — org-declared `[[screen.pattern]]` entries. Pure regex, appended
+    // to the universal set. A bad regex is a config error: warn to stderr and
+    // skip the entry rather than poisoning the whole scan.
+    for p in &cfg.patterns {
+        if p.id.is_empty() || p.regex.is_empty() {
+            continue;
+        }
+        match Regex::new(&p.regex) {
+            Ok(regex) => out.push(Pattern {
+                id: p.id.clone(),
+                severity: severity_from_str(&p.severity),
+                regex,
+                docs_downgrade: p.docs_downgrade,
+                secrets_only_survives: p.secrets_only,
+            }),
+            Err(e) => eprintln!(
+                "org screen: skipping pattern '{}' — invalid regex: {e}",
+                p.id
+            ),
         }
     }
 
@@ -274,11 +322,16 @@ fn build_dynamic_patterns(cfg: &ScreenConfig) -> Vec<Pattern> {
 
 /// Entry point — walk the institution and produce a populated report.
 pub fn run(institution: &Institution, opts: &ScreenOptions) -> ScreenReport {
-    let static_patterns = build_static_patterns();
-    let dynamic_patterns = build_dynamic_patterns(&institution_screen_config(institution));
     let cfg = institution_screen_config(institution);
+    let static_patterns = build_static_patterns();
+    let dynamic_patterns = build_dynamic_patterns(&cfg);
 
-    let gitleaks_available = !opts.no_gitleaks && which_gitleaks().is_some();
+    // Build the screener registry (configured + auto-injected gitleaks), drop
+    // `--skip-screener`'d names, then resolve binaries: optional+missing are
+    // dropped silently; required+missing stay so run_screener surfaces the
+    // error per project rather than silently no-op'ing.
+    let screeners = resolve_screeners(&cfg, &institution.root, opts);
+    let screeners_active: Vec<String> = screeners.iter().map(|s| s.name.clone()).collect();
 
     let mut report = ScreenReport {
         gh_org: institution.gh_org.clone(),
@@ -288,7 +341,7 @@ pub fn run(institution: &Institution, opts: &ScreenOptions) -> ScreenReport {
         critical: 0,
         warn: 0,
         info: 0,
-        gitleaks_available,
+        screeners_active,
         projects: Vec::new(),
     };
 
@@ -307,7 +360,8 @@ pub fn run(institution: &Institution, opts: &ScreenOptions) -> ScreenReport {
             &cfg,
             &static_patterns,
             &dynamic_patterns,
-            gitleaks_available,
+            &screeners,
+            &institution.root,
             opts,
         );
         report.critical += pf.critical;
@@ -346,7 +400,8 @@ fn scan_project(
     cfg: &ScreenConfig,
     static_patterns: &[Pattern],
     dynamic_patterns: &[Pattern],
-    gitleaks_available: bool,
+    screeners: &[Screener],
+    org_root: &Path,
     opts: &ScreenOptions,
 ) -> ProjectFindings {
     let mut pf = ProjectFindings {
@@ -358,7 +413,7 @@ fn scan_project(
         findings: Vec::new(),
         truncated: 0,
         tracked_build_artifacts: 0,
-        gitleaks_error: None,
+        screener_errors: BTreeMap::new(),
     };
 
     // Merge allow rules: global first, project-specific overrides on top.
@@ -424,8 +479,12 @@ fn scan_project(
         record_finding(&mut pf, synthetic);
     }
 
-    if gitleaks_available {
-        match run_gitleaks(project_path) {
+    // Lane B — run each active external screener over the project and ingest
+    // its findings, applying the same allowlist + secrets-only gates the
+    // pattern lane uses. A screener that bails records a per-name error so the
+    // report can't mistake a broken screener for a clean scan.
+    for screener in screeners {
+        match run_screener(screener, project_path, org_root) {
             Ok(findings) => {
                 for finding in findings {
                     if path_in_allow(Path::new(&finding.file), &allow.files) {
@@ -434,11 +493,14 @@ fn scan_project(
                     if allow.patterns.iter().any(|p| p == &finding.pattern_id) {
                         continue;
                     }
+                    if opts.secrets_only && finding.severity != Severity::Critical {
+                        continue;
+                    }
                     record_finding(&mut pf, finding);
                 }
             }
             Err(message) => {
-                pf.gitleaks_error = Some(message);
+                pf.screener_errors.insert(screener.name.clone(), message);
             }
         }
     }
@@ -498,7 +560,7 @@ fn scan_text(
         // Cheap line-length guard — extremely long lines (minified JS,
         // base64 blobs) are scanned but truncated for the snippet.
         for pattern in static_patterns.iter().chain(dynamic_patterns.iter()) {
-            if suppressed_patterns.iter().any(|p| p == pattern.id) {
+            if suppressed_patterns.iter().any(|p| p == &pattern.id) {
                 continue;
             }
             let Some(mat) = pattern.regex.find(line) else {
@@ -507,11 +569,12 @@ fn scan_text(
             let mut severity = pattern.severity;
             // Docs (markdown, etc.) downgrade pathleak Warn to Info — the
             // README is the right place to *say* `/home/nuck` exists; the
-            // wrong place is hardcoded source. Secrets never downgrade.
-            if is_doc && severity == Severity::Warn {
+            // wrong place is hardcoded source. Per-pattern `docs_downgrade`
+            // opts out; secrets (Critical) never downgrade.
+            if is_doc && severity == Severity::Warn && pattern.docs_downgrade {
                 severity = Severity::Info;
             }
-            if secrets_only && severity != Severity::Critical {
+            if secrets_only && severity != Severity::Critical && !pattern.secrets_only_survives {
                 continue;
             }
             let snippet = snippet_around(line, mat.start(), mat.end());
@@ -519,7 +582,7 @@ fn scan_text(
                 project: project.to_string(),
                 file: rel_str.clone(),
                 line: line_no + 1,
-                pattern_id: pattern.id.to_string(),
+                pattern_id: pattern.id.clone(),
                 severity,
                 snippet,
                 source: FindingSource::Pattern,
@@ -607,16 +670,139 @@ fn git_ls_files(project_path: &Path) -> Option<Vec<PathBuf>> {
     )
 }
 
-fn which_gitleaks() -> Option<PathBuf> {
+/// How a screener's process output is translated into Findings.
+#[derive(Debug, Clone, Copy)]
+enum Adapter {
+    /// orgmap-native NDJSON on stdout — one
+    /// `{severity,file,line,rule,message}` object per line.
+    Orgmap,
+    /// gitleaks' JSON detect report.
+    Gitleaks,
+}
+
+/// A resolved external screener (Lane B), built from `[[screen.screener]]`
+/// config or the auto-injected gitleaks default.
+struct Screener {
+    name: String,
+    command: String,
+    args: Vec<String>,
+    adapter: Adapter,
+    optional: bool,
+    /// Default tier for findings this screener doesn't tag with their own.
+    severity: Severity,
+}
+
+impl Screener {
+    /// The built-in gitleaks screener — auto-registered so orgmap's
+    /// out-of-box behavior ("gitleaks runs if present") is unchanged. The
+    /// gitleaks adapter bakes its own version-stable invocation, so `args`
+    /// is empty here.
+    fn builtin_gitleaks() -> Self {
+        Self {
+            name: "gitleaks".to_string(),
+            command: "gitleaks".to_string(),
+            args: Vec::new(),
+            adapter: Adapter::Gitleaks,
+            optional: true,
+            severity: Severity::Critical,
+        }
+    }
+
+    fn from_config(c: &ScreenScreener) -> Self {
+        Self {
+            name: c.name.clone(),
+            command: c.command.clone(),
+            args: c.args.clone(),
+            adapter: match c.adapter.trim().to_ascii_lowercase().as_str() {
+                "gitleaks" => Adapter::Gitleaks,
+                _ => Adapter::Orgmap,
+            },
+            optional: c.optional,
+            severity: severity_from_str(&c.severity),
+        }
+    }
+}
+
+/// Build the screener registry: configured entries first, then the built-in
+/// gitleaks screener unless config already declares one named "gitleaks"
+/// (lets an org redefine it). To disable gitleaks entirely, pass
+/// `--skip-screener gitleaks`.
+fn build_screeners(cfg: &ScreenConfig) -> Vec<Screener> {
+    let mut out: Vec<Screener> = cfg.screeners.iter().map(Screener::from_config).collect();
+    if !out.iter().any(|s| s.name == "gitleaks") {
+        out.push(Screener::builtin_gitleaks());
+    }
+    out
+}
+
+/// The screeners that will actually run: registry minus `--skip-screener`'d
+/// names, minus optional screeners whose command can't be found. Shared by
+/// `run` and `active_screeners` so the resolution rule lives in one place.
+fn resolve_screeners(cfg: &ScreenConfig, org_root: &Path, opts: &ScreenOptions) -> Vec<Screener> {
+    build_screeners(cfg)
+        .into_iter()
+        .filter(|s| !opts.skip_screeners.iter().any(|n| n == &s.name))
+        .filter(|s| command_resolves(&s.command, org_root) || !s.optional)
+        .collect()
+}
+
+/// Names of the screeners that would run for this institution/options,
+/// resolved without scanning any project. Powers `--list-screeners`.
+pub fn active_screeners(institution: &Institution, opts: &ScreenOptions) -> Vec<String> {
+    let cfg = institution_screen_config(institution);
+    resolve_screeners(&cfg, &institution.root, opts)
+        .into_iter()
+        .map(|s| s.name)
+        .collect()
+}
+
+/// Whether a screener's command can be found. A bare name is looked up on
+/// `$PATH`; a path (after `{org_root}` substitution) is checked as a file.
+fn command_resolves(command: &str, org_root: &Path) -> bool {
+    let cmd = command.replace("{org_root}", &org_root.display().to_string());
+    if cmd.contains('/') {
+        Path::new(&cmd).is_file()
+    } else {
+        which(&cmd).is_some()
+    }
+}
+
+fn which(name: &str) -> Option<PathBuf> {
     // Cheap PATH walk so we don't shell out to `which` itself.
     let path = std::env::var_os("PATH")?;
     for entry in std::env::split_paths(&path) {
-        let candidate = entry.join("gitleaks");
+        let candidate = entry.join(name);
         if candidate.is_file() {
             return Some(candidate);
         }
     }
     None
+}
+
+fn substitute(s: &str, project_path: &Path, org_root: &Path) -> String {
+    s.replace("{project}", &project_path.display().to_string())
+        .replace("{org_root}", &org_root.display().to_string())
+}
+
+fn project_name_of(project_path: &Path) -> String {
+    project_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Run one screener over a project and translate its output into Findings via
+/// the screener's adapter.
+fn run_screener(
+    screener: &Screener,
+    project_path: &Path,
+    org_root: &Path,
+) -> Result<Vec<Finding>, String> {
+    match screener.adapter {
+        Adapter::Gitleaks => run_gitleaks_adapter(screener, project_path),
+        Adapter::Orgmap => run_orgmap_adapter(screener, project_path, org_root),
+    }
 }
 
 /// JSON shape emitted by `gitleaks detect --report-format json`. Only the
@@ -635,19 +821,18 @@ struct GitleaksRecord {
     secret: String,
 }
 
-fn run_gitleaks(project_path: &Path) -> Result<Vec<Finding>, String> {
-    // Write the report to a temp file rather than stdout — gitleaks
-    // mingles human-readable progress chatter on stdout/stderr and the
-    // `--report-path -` contract has shifted between versions. A
-    // temp-file dance is the stable shape.
-    let report_dir = std::env::temp_dir();
-    let report_path = report_dir.join(format!(
-        "orgmap-gitleaks-{}.json",
+/// Built-in adapter for gitleaks' JSON detect report. Writes to a temp file
+/// rather than stdout — gitleaks mingles human-readable progress chatter on
+/// stdout/stderr and the `--report-path -` contract has shifted between
+/// versions, so the temp-file dance is the stable shape. Walks history by
+/// default (rotated-but-committed keys are still leaks).
+fn run_gitleaks_adapter(screener: &Screener, project_path: &Path) -> Result<Vec<Finding>, String> {
+    let report_path = std::env::temp_dir().join(format!(
+        "orgmap-{}-{}.json",
+        screener.name,
         std::process::id()
     ));
-    // Detect with --no-banner + JSON report. Walks history by default —
-    // we want that: rotated-but-committed keys are still leaks.
-    let output = Command::new("gitleaks")
+    let output = Command::new(&screener.command)
         .arg("detect")
         .arg("--source")
         .arg(project_path)
@@ -660,11 +845,11 @@ fn run_gitleaks(project_path: &Path) -> Result<Vec<Finding>, String> {
         .arg("--exit-code")
         .arg("0") // never let gitleaks itself fail the process — we read its findings
         .output()
-        .map_err(|e| format!("gitleaks spawn failed: {e}"))?;
+        .map_err(|e| format!("{} spawn failed: {e}", screener.name))?;
 
     if !output.status.success() && !report_path.exists() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gitleaks errored: {}", stderr.trim()));
+        return Err(format!("{} errored: {}", screener.name, stderr.trim()));
     }
 
     let raw = std::fs::read_to_string(&report_path).map_err(|e| format!("read report: {e}"))?;
@@ -674,11 +859,7 @@ fn run_gitleaks(project_path: &Path) -> Result<Vec<Finding>, String> {
     }
     let records: Vec<GitleaksRecord> =
         serde_json::from_str(&raw).map_err(|e| format!("parse report: {e}"))?;
-    let project_name = project_path
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or("")
-        .to_string();
+    let project_name = project_name_of(project_path);
     Ok(records
         .into_iter()
         .map(|r| {
@@ -691,13 +872,93 @@ fn run_gitleaks(project_path: &Path) -> Result<Vec<Finding>, String> {
                 project: project_name.clone(),
                 file: relative_or_self(project_path, &r.file),
                 line: r.start_line,
-                pattern_id: format!("gitleaks:{}", r.rule_id),
-                severity: Severity::Critical,
+                pattern_id: format!("{}:{}", screener.name, r.rule_id),
+                severity: screener.severity,
                 snippet,
-                source: FindingSource::Gitleaks,
+                source: FindingSource::Screener(screener.name.clone()),
             }
         })
         .collect())
+}
+
+/// One finding line of the orgmap-native screener protocol. A custom screener
+/// prints NDJSON to stdout, one of these per line.
+#[derive(Debug, serde::Deserialize)]
+struct OrgmapFindingRecord {
+    #[serde(default)]
+    severity: String,
+    #[serde(default)]
+    file: String,
+    #[serde(default)]
+    line: usize,
+    #[serde(default)]
+    rule: String,
+    #[serde(default)]
+    message: String,
+}
+
+/// Built-in adapter for the orgmap-native protocol: run the org's command and
+/// parse NDJSON findings from stdout. This is the seam that lets an org plug
+/// in any language/taste-specific check without orgmap learning the language.
+fn run_orgmap_adapter(
+    screener: &Screener,
+    project_path: &Path,
+    org_root: &Path,
+) -> Result<Vec<Finding>, String> {
+    let cmd = substitute(&screener.command, project_path, org_root);
+    let args: Vec<String> = screener
+        .args
+        .iter()
+        .map(|a| substitute(a, project_path, org_root))
+        .collect();
+    let output = Command::new(&cmd)
+        .args(&args)
+        .current_dir(project_path)
+        .output()
+        .map_err(|e| format!("{} spawn failed: {e}", screener.name))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let code = output
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".to_string());
+        return Err(format!("{} exited {}: {}", screener.name, code, stderr.trim()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let project_name = project_name_of(project_path);
+    let mut out = Vec::new();
+    for (i, raw) in stdout.lines().enumerate() {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let rec: OrgmapFindingRecord = serde_json::from_str(raw)
+            .map_err(|e| format!("{} line {}: bad NDJSON: {e}", screener.name, i + 1))?;
+        if rec.file.is_empty() {
+            continue;
+        }
+        let severity = if rec.severity.is_empty() {
+            screener.severity
+        } else {
+            severity_from_str(&rec.severity)
+        };
+        let pattern_id = if rec.rule.is_empty() {
+            screener.name.clone()
+        } else {
+            format!("{}:{}", screener.name, rec.rule)
+        };
+        out.push(Finding {
+            project: project_name.clone(),
+            file: relative_or_self(project_path, &rec.file),
+            line: rec.line,
+            pattern_id,
+            severity,
+            snippet: rec.message,
+            source: FindingSource::Screener(screener.name.clone()),
+        });
+    }
+    Ok(out)
 }
 
 fn relative_or_self(project_path: &Path, absolute_or_relative: &str) -> String {

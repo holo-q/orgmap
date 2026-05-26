@@ -49,6 +49,83 @@ pub struct ScreenConfig {
     /// allow lookups.
     #[serde(default)]
     pub global_allow: ScreenAllow,
+    /// Lane A — org-defined declarative screening patterns (`[[screen.pattern]]`).
+    /// Pure regex, appended to orgmap's baked universal set. orgmap ships NONE
+    /// of these; every entry is the adopting org's own invariant. See
+    /// docs/screen-extensibility.md. (TOML key is the singular array-of-tables
+    /// `[[screen.pattern]]`; the field is plural.)
+    #[serde(default, rename = "pattern")]
+    pub patterns: Vec<ScreenPattern>,
+    /// Lane B — org-registered external screeners (`[[screen.screener]]`).
+    /// Each is an external command orgmap runs per project and whose findings
+    /// it ingests via `adapter`. The built-in `gitleaks` screener is
+    /// auto-registered unless a screener named "gitleaks" appears here. orgmap
+    /// ships no org-specific screeners; language/taste rules live as the org's
+    /// own scripts, never in orgmap core.
+    #[serde(default, rename = "screener")]
+    pub screeners: Vec<ScreenScreener>,
+}
+
+/// One org-defined declarative pattern (Lane A). Regex-only and
+/// language-agnostic — the safe extension lane. `severity` is a string
+/// (`critical`|`warn`|`info`) parsed by the screen engine.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScreenPattern {
+    /// Stable handle used by allowlists and surfaced on report rows.
+    pub id: String,
+    /// `critical` | `warn` | `info`. Defaults to `warn`.
+    #[serde(default = "screen_default_warn")]
+    pub severity: String,
+    /// The regex (RE2 syntax, `regex` crate).
+    pub regex: String,
+    /// Downgrade a `warn` match to `info` inside doc files (md/txt/rst).
+    /// Defaults true, mirroring the universal pathleak behavior.
+    #[serde(default = "screen_default_true")]
+    pub docs_downgrade: bool,
+    /// Survive the `--secrets-only` gate even when not `critical`. Default false.
+    #[serde(default)]
+    pub secrets_only: bool,
+}
+
+/// One org-registered external screener (Lane B). orgmap runs
+/// `command args…` per project (substituting `{project}` / `{org_root}`)
+/// and ingests its output via `adapter`. This is how an org plugs in
+/// language- or taste-specific checks without a line in orgmap core.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScreenScreener {
+    /// Display name + provenance tag stamped on every finding it produces.
+    pub name: String,
+    /// Executable — resolved on `$PATH` if bare, else a path (supports
+    /// the `{org_root}` placeholder).
+    pub command: String,
+    /// Arguments. `{project}` → absolute project path, `{org_root}` → org root.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Output translator: `orgmap` (native NDJSON on stdout) or `gitleaks`
+    /// (its JSON report). Defaults to `orgmap`.
+    #[serde(default = "screen_default_adapter")]
+    pub adapter: String,
+    /// Missing binary → skip silently (true) or record an error (false).
+    /// Defaults true, matching the gitleaks-optional behavior.
+    #[serde(default = "screen_default_true")]
+    pub optional: bool,
+    /// Default tier for findings that don't carry their own `severity`.
+    /// Defaults to `critical`.
+    #[serde(default = "screen_default_critical")]
+    pub severity: String,
+}
+
+fn screen_default_true() -> bool {
+    true
+}
+fn screen_default_warn() -> String {
+    "warn".to_string()
+}
+fn screen_default_critical() -> String {
+    "critical".to_string()
+}
+fn screen_default_adapter() -> String {
+    "orgmap".to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
