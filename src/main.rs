@@ -115,6 +115,11 @@ enum Command {
         /// List the screeners that would run (built-in + configured) and exit.
         #[arg(long)]
         list_screeners: bool,
+        /// Run deep screeners (full-history gitleaks) even on a bulk org-wide
+        /// scan. A project-scoped `org screen <project>` runs them anyway;
+        /// a bare org-wide scan skips them unless this is set.
+        #[arg(long)]
+        deep: bool,
         /// Only show Critical (secret) findings; suppress pathleak + sloppy.
         #[arg(long)]
         secrets_only: bool,
@@ -311,6 +316,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             skip_screener,
             no_gitleaks,
             list_screeners,
+            deep,
             secrets_only,
             no_fail,
         }) => {
@@ -323,9 +329,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if no_gitleaks {
                 skip_screeners.push("gitleaks".to_string());
             }
+            // Deep screeners run when the scan is project-scoped (you're about
+            // to publish that one repo) or `--deep` is explicit. A bare
+            // org-wide scan leaves them off so gitleaks can't multiply.
+            let run_deep = project.is_some() || deep;
             let opts = orgmap::screen::ScreenOptions {
                 skip_screeners,
                 secrets_only,
+                run_deep,
             };
             // `--list-screeners` resolves the registry without scanning.
             if list_screeners {

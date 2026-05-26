@@ -177,6 +177,11 @@ pub struct ScreenOptions {
     pub skip_screeners: Vec<String>,
     /// When true, only emit Critical findings (silence pathleak + sloppy).
     pub secrets_only: bool,
+    /// Run `deep` screeners (e.g. gitleaks' full-history walk). Set by main
+    /// when the scan is project-scoped OR `--deep` was passed; a bare org-wide
+    /// scan leaves this false so expensive screeners don't multiply across
+    /// every project.
+    pub run_deep: bool,
 }
 
 /// A compiled screening pattern. `id` is the stable handle used by
@@ -690,6 +695,9 @@ struct Screener {
     optional: bool,
     /// Default tier for findings this screener doesn't tag with their own.
     severity: Severity,
+    /// Expensive (full-history/entropy) — skipped on bulk org-wide runs
+    /// unless `--deep`; always runs on a project-scoped scan.
+    deep: bool,
 }
 
 impl Screener {
@@ -705,6 +713,7 @@ impl Screener {
             adapter: Adapter::Gitleaks,
             optional: true,
             severity: Severity::Critical,
+            deep: true, // full git-history entropy walk — opt-in for bulk runs
         }
     }
 
@@ -719,6 +728,7 @@ impl Screener {
             },
             optional: c.optional,
             severity: severity_from_str(&c.severity),
+            deep: c.deep,
         }
     }
 }
@@ -782,6 +792,7 @@ fn discover_screener_dir(dir: &str, org_root: &Path) -> Vec<Screener> {
             adapter: Adapter::Orgmap,
             optional: false,
             severity: Severity::Warn,
+            deep: false, // dir-discovered scripts are cheap; always run
         });
     }
     out
@@ -802,6 +813,8 @@ fn resolve_screeners(cfg: &ScreenConfig, org_root: &Path, opts: &ScreenOptions) 
     build_screeners(cfg, org_root)
         .into_iter()
         .filter(|s| !opts.skip_screeners.iter().any(|n| n == &s.name))
+        // Deep screeners (gitleaks history walk) only run when scoped/--deep.
+        .filter(|s| !s.deep || opts.run_deep)
         .filter(|s| command_resolves(&s.command, org_root) || !s.optional)
         .collect()
 }

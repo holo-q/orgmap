@@ -104,6 +104,22 @@ Non-executable files (READMEs, fixtures) are ignored; explicit
 auto-injects last. This is the ergonomic holoq itself uses — its `modrs-purity`
 roof-law screener lives in `tooling/screeners/` and registers with one line.
 
+### Cost tiers — `deep` screeners
+
+Some screeners are irreducibly expensive: gitleaks `detect` walks the entire
+git history per repo (O(commits)), and across a whole org that multiplies into
+a CPU detonation. A screener can be marked `deep = true` (the built-in gitleaks
+is). Deep screeners run on a **project-scoped** scan (`org screen <project>` —
+you're about to publish that one repo, you want the thorough pass) but are
+**skipped on a bare org-wide scan** unless `--deep` is passed. Cheap screeners
+(declared patterns, dir-discovered scripts like `modrs-purity`) always run, so
+`org screen` stays fast and safe to repeat across the whole org. This isn't a
+gate hiding cost — it matches *when* the expensive work runs to actual intent.
+
+Relatedly, `[scan] blacklist_patterns` prunes recurring vendored trees
+(`references/`, …) at any depth so screeners never waste time on upstream code
+you don't own.
+
 ### The orgmap finding protocol (`adapter = "orgmap"`)
 
 A custom screener prints **NDJSON to stdout**, one finding per line:
@@ -127,7 +143,7 @@ adapter or just speaks the native protocol via a 3-line wrapper.
 
 1. `FindingSource::Gitleaks` → `FindingSource::Screener(String)`; update the
    source label in `print_screen_report`.
-2. New descriptor `Screener { name, command, args, adapter, optional, severity }`
+2. New descriptor `Screener { name, command, args, adapter, optional, severity, deep }`
    + `run_screener(&Screener, project_path, org_root) -> Result<Vec<Finding>, String>`
    dispatching on adapter (gitleaks → temp-report dance; orgmap → placeholder
    substitution → spawn → NDJSON-parse stdout). `resolve_screeners` centralizes

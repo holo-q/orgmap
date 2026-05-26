@@ -120,6 +120,12 @@ pub struct ScreenScreener {
     /// Defaults to `critical`.
     #[serde(default = "screen_default_critical")]
     pub severity: String,
+    /// Mark an expensive screener (full git-history walk, heavy entropy scan)
+    /// as "deep": it runs on project-scoped screens but is skipped on bulk
+    /// org-wide runs unless `--deep` is passed. Default false. The built-in
+    /// gitleaks screener is deep — O(history)×N projects is a CPU detonation.
+    #[serde(default)]
+    pub deep: bool,
 }
 
 fn screen_default_true() -> bool {
@@ -155,8 +161,19 @@ pub struct ScanConfig {
     pub gh_org: String,
     #[serde(default)]
     pub roots: Vec<String>,
+    /// Exact project-NAME exclusions — a discovered project whose directory
+    /// name equals an entry is marked blacklisted.
     #[serde(default)]
     pub blacklist: Vec<String>,
+    /// Path-component exclusion PATTERNS — unlike `blacklist` (exact name),
+    /// these match a single path segment wherever it nests, pruning the
+    /// project entirely. Recurring vendored conventions like `references`
+    /// (which appears at multiple scopes — `references/`,
+    /// `repo-cosmic/references/`, …) belong here so one entry catches them
+    /// all, instead of enumerating each exact name. Trailing slashes tolerated.
+    /// orgmap core hardcodes none; `org init` seeds a recommended default set.
+    #[serde(default)]
+    pub blacklist_patterns: Vec<String>,
     #[serde(default)]
     pub default_section: Option<String>,
 }
@@ -621,6 +638,20 @@ fn build_workspaces(config: &OrgConfig, projects: &[Project]) -> Vec<Workspace> 
     workspaces
 }
 
+/// True if any component of `path` matches a `blacklist_patterns` entry — a
+/// directory name matched at ANY depth (trailing-slash tolerant). Prunes
+/// recurring vendored conventions like `references/` regardless of nesting.
+fn path_has_excluded_component(path: &Path, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    path.components().any(|component| {
+        component.as_os_str().to_str().map_or(false, |segment| {
+            patterns.iter().any(|p| p.trim_end_matches('/') == segment)
+        })
+    })
+}
+
 fn scan_local_projects(config: &OrgConfig) -> Vec<LocalProject> {
     let mut seen = BTreeSet::new();
     let mut projects = Vec::new();
@@ -638,6 +669,10 @@ fn scan_local_projects(config: &OrgConfig) -> Vec<LocalProject> {
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() || !path.join(".git").exists() {
+                continue;
+            }
+            // Prune recurring vendored trees (references/, etc.) at any depth.
+            if path_has_excluded_component(&path, &config.scan.blacklist_patterns) {
                 continue;
             }
             let Some(name) = path.file_name().and_then(OsStr::to_str).map(str::to_string) else {
