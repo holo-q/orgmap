@@ -25,6 +25,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Scaffold a starter orgmap.toml — bootstrap a software org from scratch.
+    Init {
+        /// Directory to initialize. Defaults to the current directory.
+        path: Option<PathBuf>,
+        /// Overwrite an existing orgmap.toml.
+        #[arg(long)]
+        force: bool,
+    },
     /// Current operational report for the active institution.
     Work {
         /// Emit JSON instead of terminal text.
@@ -201,6 +209,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 print_org_list(&orgs);
             }
+        }
+        Some(Command::Init { path, force }) => {
+            let dir = path.unwrap_or(std::env::current_dir()?);
+            run_init(&dir, force)?;
         }
         Some(Command::Work { json }) => {
             let institution = orgmap::institution::load_current_institution(
@@ -388,6 +400,75 @@ fn print_plugin_reload_report(report: &orgmap::plugin::PluginReloadReport) {
 
 fn print_json<T: Serialize>(value: &T) -> serde_json::Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+/// Starter orgmap.toml written by `org init`. Generic — no org-specific
+/// taxonomy. Carries the recommended DEFAULT OPINION (vendored-tree exclude +
+/// a screener dir) so a fresh org is safe to scan day one; orgmap core
+/// hardcodes none of it.
+const INIT_TEMPLATE: &str = r#"# orgmap — software-organization index + pre-publish screen config.
+# Scaffolded by `org init`. Edit freely. Docs: github.com/holo-q/orgmap
+
+[scan]
+# GitHub org/owner for repo metadata + `org plug` (optional).
+gh_org = "your-org"
+# Fall back to `gh repo` descriptions when a project declares none.
+gh_fallback = true
+# Section assigned to discovered projects that match no override.
+default_section = "uncategorized"
+
+# Workspace directories scanned (one level deep, .git-gated): each direct
+# child git repo becomes a project. Fill with your own layout, e.g.:
+roots = [
+    # "~/code/libs",
+    # "~/code/apps",
+]
+
+# Exact project-NAME exclusions (a discovered repo whose dir name matches).
+blacklist = []
+
+# Path-component exclusion PATTERNS matched at ANY depth (recommended default).
+# `references` is the conventional "vendored upstream we consult but don't own"
+# directory — pruning it keeps scans + screeners off third-party code wherever
+# it nests. Add your own (e.g. "vendor", "third_party").
+blacklist_patterns = ["references"]
+
+[screen]
+# Personal identity strings flagged as leaks in tracked text (defaults to $HOME).
+personal_paths   = []
+personal_handles = []
+
+# Directory of your own screener scripts: every executable becomes a screener
+# speaking the orgmap NDJSON protocol (stdout: {severity,file,line,rule,message}).
+# Drop a script in, it runs. gitleaks is auto-registered if on PATH.
+screener_dirs = ["tooling/screeners"]
+"#;
+
+/// Scaffold a starter orgmap.toml + `tooling/screeners/` in `dir`.
+fn run_init(dir: &Path, force: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let config_path = dir.join("orgmap.toml");
+    if config_path.exists() && !force {
+        eprintln!(
+            "{} {} already exists — pass --force to overwrite",
+            color_bold(196, "org init:"),
+            config_path.display()
+        );
+        std::process::exit(1);
+    }
+    std::fs::create_dir_all(dir.join("tooling").join("screeners"))?;
+    std::fs::write(&config_path, INIT_TEMPLATE)?;
+    println!("{} scaffolded a new org", color_bold(48, "org init"));
+    println!("  {} {}", dim("config "), display_path(&config_path));
+    println!(
+        "  {} {}",
+        dim("screeners"),
+        display_path(&dir.join("tooling").join("screeners"))
+    );
+    println!();
+    println!("Next:");
+    println!("  1. set {} and fill {} with your workspace dirs", color(81, "[scan].gh_org"), color(81, "[scan].roots"));
+    println!("  2. {} to confirm discovery, {} to sweep for secrets/leaks", color(48, "org list"), color(48, "org screen"));
     Ok(())
 }
 
