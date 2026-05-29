@@ -364,7 +364,14 @@ fn dispatch_babel_reload_for_host(host: PluginHost, reason: &str) -> PluginReloa
         PluginHost::Claude => "claude",
         PluginHost::Codex => "codex",
     };
-    let output = Command::new("babel")
+    // The reload dispatcher is configurable so orgmap isn't hardwired to
+    // holoq's `babel` harness: ORGMAP_PLUGIN_RELOAD_CMD overrides the command
+    // (it must accept babel's `plugin reload <harness> --reason --json`
+    // contract). An absent/failing dispatcher degrades to a graceful ok:false
+    // signal — `org plug reload` is an optional, holoq-flavored convenience.
+    let reload_cmd =
+        std::env::var("ORGMAP_PLUGIN_RELOAD_CMD").unwrap_or_else(|_| "babel".to_string());
+    let output = Command::new(&reload_cmd)
         .args(["plugin", "reload", harness, "--reason", reason, "--json"])
         .output();
     match output {
@@ -376,7 +383,7 @@ fn dispatch_babel_reload_for_host(host: PluginHost, reason: &str) -> PluginReloa
                 harness: harness.to_string(),
                 ok: output.status.success(),
                 message: if stdout.is_empty() {
-                    format!("babel plugin reload {harness} exited {}", output.status)
+                    format!("{reload_cmd} plugin reload {harness} exited {}", output.status)
                 } else {
                     stdout
                 },
@@ -387,7 +394,7 @@ fn dispatch_babel_reload_for_host(host: PluginHost, reason: &str) -> PluginReloa
             host,
             harness: harness.to_string(),
             ok: false,
-            message: format!("failed to execute babel plugin reload {harness}: {error}"),
+            message: format!("failed to execute {reload_cmd} plugin reload {harness}: {error}"),
             stderr: None,
         },
     }

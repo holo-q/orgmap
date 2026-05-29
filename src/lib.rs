@@ -357,7 +357,7 @@ fn read_definition(root: &Path, marker: PathBuf) -> Option<WorkgroupDefinition> 
         .filter(|name| !name.is_empty())?;
     let level = first_string(table, &["level"])
         .map(|level| WorkgroupLevel::parse(&level))
-        .unwrap_or_else(|| default_level(root));
+        .unwrap_or_else(default_level);
     let color = first_string(table, &["color", "fg", "foreground"]);
     let ansi256 = first_ansi256(table).or_else(|| color.as_deref().and_then(color_text_to_ansi256));
 
@@ -480,16 +480,17 @@ fn string_list(value: &toml::Value) -> Vec<String> {
     }
 }
 
-fn default_level(root: &Path) -> WorkgroupLevel {
-    if root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("repo-"))
-    {
-        WorkgroupLevel::Domain
-    } else {
-        WorkgroupLevel::Umbrella
-    }
+/// Fallback workgroup level when `workgroup.toml` declares no explicit `level`
+/// (an explicit declaration always wins — see the `first_string(table,
+/// &["level"])` call site). Deliberately NAME-AGNOSTIC: orgmap assumes nothing
+/// about an adopter's directory naming. (holoq's `repo-*` convention used to be
+/// inferred here as Domain — a holoq-ism that mis-leveled any org naming its
+/// domains differently, e.g. `service-auth`. holoq's `repo-*` dirs all declare
+/// `level = "domain"` explicitly, so dropping the heuristic changes nothing for
+/// holoq while unblocking everyone else.) Declare `level` per workgroup.toml;
+/// an undeclared dir defaults to the neutral Umbrella.
+fn default_level() -> WorkgroupLevel {
+    WorkgroupLevel::Umbrella
 }
 
 fn normalize_scope_path(path: &Path) -> PathBuf {
