@@ -301,6 +301,131 @@ pub fn auto_workgroup_ansi256(name: &str) -> u8 {
     PALETTE[hash % PALETTE.len()]
 }
 
+/// A project's position in the org's `[sections]` pecking order: which section
+/// block (in *declaration order*, not alphabetical) and which index within it.
+///
+/// This is the rank babel's HUD sorts by — orgmap-ranked projects float above
+/// the unranked rest. It was historically reimplemented as a hand-rolled
+/// `[sections]` line-scanner in babel (`format.rs` / `ProjectOrder.cs`); this is
+/// the canonical Rust truth that the C# binding now consumes over FFI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SectionRank {
+    /// Section block index in *file declaration order* (first `name = [...]`
+    /// array encountered is section 0). NOT the alphabetical BTreeMap order —
+    /// the visual pecking order is the order sections are written.
+    pub section: usize,
+    /// Project index within its section block (declaration order).
+    pub project: usize,
+}
+
+/// Read an `orgmap.toml`'s `[sections]` table into a project → [`SectionRank`]
+/// map. Mirrors babel's former `parse_orgmap_ranks`:
+///
+/// - only the `[sections]` table matters; each `name = [ "stage:project", … ]`
+///   array assigns the next sequential **section index in declaration order**
+///   and per-entry **project indices**,
+/// - the `stage:` prefix (e.g. `"3:babel"`) is stripped to the bare project
+///   name (`babel`),
+/// - first occurrence of a project name wins; later duplicates are ignored.
+///
+/// A missing/unreadable/sections-less file yields an empty map (best-effort) —
+/// the HUD treats an unranked project as tier-1 (below all ranked ones).
+///
+/// Declaration order is load-bearing — and it is precisely what a structural
+/// TOML parse would *destroy*. `toml::Value`'s table is a `BTreeMap` (sorted by
+/// key), so `[sections]` arrays would come back alphabetized, scrambling the
+/// pecking order; `institution::OrgConfig::sections` has the same BTreeMap flaw.
+/// So this is a deliberate **line scanner** over the raw text (the canonical home
+/// of babel's former `parse_orgmap_ranks`), tracking the open `[sections]` block
+/// and the cursor inside an open array literal — preserving the order arrays and
+/// entries are *written*, which is the order users intend.
+pub fn section_ranks(orgmap_toml: &Path) -> std::collections::BTreeMap<String, SectionRank> {
+    let mut ranks = std::collections::BTreeMap::new();
+    let Ok(text) = std::fs::read_to_string(orgmap_toml) else {
+        return ranks;
+    };
+
+    let mut in_sections = false;
+    let mut section_index: usize = 0;
+    // `cursor` = the (section, next-project) position while inside an open array
+    // literal; `None` between arrays.
+    let mut cursor: Option<(usize, usize)> = None;
+
+    for raw_line in text.lines() {
+        // Strip an inline `#` comment, then trim.
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line.starts_with('[') {
+            in_sections = line == "[sections]";
+            cursor = None;
+            continue;
+        }
+        if !in_sections {
+            continue;
+        }
+
+        // A `name = [` line opens a new section block at the next sequential index.
+        if let Some((_, rest)) = line.split_once('=') {
+            if rest.contains('[') {
+                cursor = Some((section_index, 0));
+                section_index += 1;
+            }
+        }
+
+        if let Some((section, mut next_project)) = cursor {
+            for entry in quoted_tokens(line) {
+                let name = section_entry_project_name(&entry);
+                if name.is_empty() {
+                    continue;
+                }
+                // First occurrence wins (matches babel's historical `or_insert`).
+                ranks.entry(name).or_insert(SectionRank {
+                    section,
+                    project: next_project,
+                });
+                next_project += 1;
+            }
+            cursor = Some((section, next_project));
+        }
+
+        // A `]` closes the current array literal.
+        if line.contains(']') {
+            cursor = None;
+        }
+    }
+
+    ranks
+}
+
+/// Pull every double-quoted token out of a line. Mirrors babel's `quoted_tokens`
+/// — used by [`section_ranks`] to lift `"stage:project"` entries out of an array
+/// literal without a full TOML parse (which would lose declaration order).
+fn quoted_tokens(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut rest = line;
+    while let Some(start) = rest.find('"') {
+        let after_start = &rest[start + 1..];
+        let Some(end) = after_start.find('"') else {
+            break;
+        };
+        tokens.push(after_start[..end].to_string());
+        rest = &after_start[end + 1..];
+    }
+    tokens
+}
+
+/// Strip an orgmap `stage:` prefix (e.g. `"3:babel"` → `"babel"`), returning the
+/// trimmed bare project name. Mirrors babel's `orgmap_project_name`.
+fn section_entry_project_name(entry: &str) -> String {
+    match entry.split_once(':') {
+        Some((_stage, rest)) => rest.trim().to_string(),
+        None => entry.trim().to_string(),
+    }
+}
+
 pub fn color_text_to_ansi256(text: &str) -> Option<u8> {
     let text = text.trim();
     if let Ok(ansi) = text.parse::<u8>() {
@@ -894,6 +1019,52 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
 
         assert_eq!(definition.name, "orgmap-name");
+    }
+
+    /// `section_ranks` must rank by **declaration order** of the `[sections]`
+    /// blocks, NOT alphabetically — the visual pecking order is the order the
+    /// arrays are written. This is the whole reason it parses `toml::Value`
+    /// directly instead of routing through `institution::OrgConfig` (whose
+    /// `sections` BTreeMap would re-sort alphabetically). The probe writes
+    /// `zeta` before `alpha`: a correct reading puts zeta's project at section 0.
+    #[test]
+    fn section_ranks_follow_declaration_order_not_alphabetical() {
+        let root = tmp_root("section-ranks");
+        let orgmap = root.join(ORGMAP_FILE);
+        std::fs::write(
+            &orgmap,
+            "[sections]\nzeta = [\"3:zz\", \"2:zz2\"]\nalpha = [\"3:aa\"]\n",
+        )
+        .unwrap();
+
+        let ranks = section_ranks(&orgmap);
+        std::fs::remove_dir_all(&root).unwrap();
+
+        // zeta is declared first ⇒ section 0; its two entries are projects 0, 1.
+        assert_eq!(ranks["zz"], SectionRank { section: 0, project: 0 });
+        assert_eq!(ranks["zz2"], SectionRank { section: 0, project: 1 });
+        // alpha is declared second ⇒ section 1 even though 'alpha' < 'zeta'.
+        assert_eq!(ranks["aa"], SectionRank { section: 1, project: 0 });
+    }
+
+    /// The `stage:` prefix is stripped to the bare project name, and the first
+    /// occurrence of a duplicate name wins (matching babel's historical `or_insert`).
+    #[test]
+    fn section_ranks_strip_stage_and_keep_first_occurrence() {
+        let root = tmp_root("section-ranks-dup");
+        let orgmap = root.join(ORGMAP_FILE);
+        std::fs::write(
+            &orgmap,
+            "[sections]\nfirst = [\"3:babel\"]\nsecond = [\"2:babel\"]\n",
+        )
+        .unwrap();
+
+        let ranks = section_ranks(&orgmap);
+        std::fs::remove_dir_all(&root).unwrap();
+
+        // Bare name recovered; first occurrence (section 0) wins over the later dup.
+        assert_eq!(ranks["babel"], SectionRank { section: 0, project: 0 });
+        assert_eq!(ranks.len(), 1);
     }
 
     #[test]

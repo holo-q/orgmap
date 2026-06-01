@@ -1,1 +1,6 @@
+# Rust build output (orgmap lib + orgmap-ffi cdylib)
 target/
+
+# C# build output (Orgmap.cs binding project)
+bin/
+obj/

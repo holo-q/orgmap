@@ -1,0 +1,40 @@
+# orgmap BindConfig for rustbind — the C# face of the orgmap workgroup-identity
+# protocol. `rk run rustbind -- gen-cs --config rustbind.toml` regenerates
+# src/Orgmap/Interop/Native.cs from ../orgmap-ffi/bindings.json.
+#
+# Paths are resolved relative to THIS file's directory (the Orgmap.cs repo root).
+#
+# Fresh crate: empty naming lexicons and no overrides — the four orgmap_* fns
+# PascalCase naively (orgmap_identity_for_path → OrgmapIdentityForPath) and the
+# thin ergonomic Orgmap.cs marshals strings/out-params by hand. There is no
+# version-probe fn (orgmap-ffi ships none), so the resolver skips the load-time
+# version check.
+
+# ── identity of the emitted interop layer ──────────────────────────────────────
+# Interop namespace deliberately NOT under a bare `Orgmap` namespace token —
+# the ergonomic entry point is a static class named `Orgmap`, and a sibling
+# `Orgmap` *namespace* would collide with it at every `Orgmap.Method()` call site
+# (CS0234: the namespace wins name resolution). Nesting under `OrgmapBinding`
+# keeps `Orgmap` available purely as the class.
+namespace = "OrgmapBinding.Interop"
+lib_name  = "orgmap_ffi"
+banner    = "// GENERATED from bindings.json by rustbind — DO NOT EDIT. Regenerate with `rk run rustbind -- gen-cs --config rustbind.toml`. ffi={ffi}"
+
+# ── runtime library resolution knobs ───────────────────────────────────────────
+ffi_dir_env_var      = "ORGMAP_FFI_DIR"
+ffi_path_env_var     = "ORGMAP_FFI_PATH"
+# version_probe_fn intentionally omitted — orgmap-ffi has no version self-check.
+native_search_subdir = "orgmap-ffi"
+
+# ── pipeline I/O paths (relative to this config's directory) ────────────────────
+manifest_path = "../orgmap-ffi/bindings.json"
+out_path      = "src/Orgmap/Interop/Native.cs"
+src_dir       = "src/Orgmap"
+# overrides_path omitted — no ergonomic marshal sugar; the hand-written layer
+# marshals the few string/out params directly.
+
+# ── naming deviations ───────────────────────────────────────────────────────────
+# None — naive PascalCasing already matches the ergonomic layer's call sites.
+compound_words   = []
+name_aliases     = []
+compound_members = []

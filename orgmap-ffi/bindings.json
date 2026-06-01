@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "ffi_version": "0.1.0",
+  "functions": [
+    {
+      "name": "orgmap_color_text_to_ansi256",
+      "params": [
+        {
+          "name": "text",
+          "type": {
+            "kind": "ptr",
+            "mutable": false,
+            "elem": {
+              "kind": "char"
+            }
+          }
+        },
+        {
+          "name": "out_ansi",
+          "type": {
+            "kind": "ptr",
+            "mutable": true,
+            "elem": {
+              "kind": "prim",
+              "name": "u8"
+            }
+          }
+        }
+      ],
+      "ret": {
+        "kind": "prim",
+        "name": "bool"
+      },
+      "doc": "Parse a color token (bare ANSI index, `#RRGGBB` hex, or named ANSI color) to\nan ansi256 index. Returns `true` and writes the index to `out_ansi` when the\ntoken resolves; returns `false` (leaving `out_ansi` untouched) otherwise.\n\nWraps [`orgmap::color_text_to_ansi256`] — including the theme-balanced\nperceptual-luminance hex→ansi256 bisection that babel's C# port could not\nreplicate.\n\n# Safety\n`text` must be a valid NUL-terminated UTF-8 C string; `out_ansi` must be a\nvalid, writable `*mut u8`."
+    },
+    {
+      "name": "orgmap_identity_for_path",
+      "params": [
+        {
+          "name": "path",
+          "type": {
+            "kind": "ptr",
+            "mutable": false,
+            "elem": {
+              "kind": "char"
+            }
+          }
+        }
+      ],
+      "ret": {
+        "kind": "ptr",
+        "mutable": true,
+        "elem": {
+          "kind": "char"
+        }
+      },
+      "doc": "Resolve a path to its owning workgroup identity, returned as JSON\n(`{\"root\",\"name\",\"ansi256\",\"icon\"}`) in a freshly-allocated C string, or\n**null** when no workgroup marker encloses the path.\n\nWraps [`orgmap::identity_for_path`]. Free the result with\n[`orgmap_string_free`].\n\n# Safety\n`path` must be a valid NUL-terminated UTF-8 C string."
+    },
+    {
+      "name": "orgmap_section_ranks",
+      "params": [
+        {
+          "name": "orgmap_toml_path",
+          "type": {
+            "kind": "ptr",
+            "mutable": false,
+            "elem": {
+              "kind": "char"
+            }
+          }
+        }
+      ],
+      "ret": {
+        "kind": "ptr",
+        "mutable": true,
+        "elem": {
+          "kind": "char"
+        }
+      },
+      "doc": "Read an `orgmap.toml`'s `[sections]` table into a JSON **array** of\n`{\"name\",\"section\",\"project\"}` rows (section/project in file declaration\norder), in a freshly-allocated C string. Never null for a valid call: a\nmissing/unreadable/sections-less file yields `\"[]\"`.\n\nWraps [`orgmap::section_ranks`]. Free the result with [`orgmap_string_free`].\nAn array (not an object) is used so the C# side can build its dictionary\nwithout imposing JSON-object key ordering semantics.\n\n# Safety\n`orgmap_toml_path` must be a valid NUL-terminated UTF-8 C string."
+    },
+    {
+      "name": "orgmap_string_free",
+      "params": [
+        {
+          "name": "s",
+          "type": {
+            "kind": "ptr",
+            "mutable": true,
+            "elem": {
+              "kind": "char"
+            }
+          }
+        }
+      ],
+      "ret": {
+        "kind": "void"
+      },
+      "doc": "Free a C string previously returned by an `orgmap_*` function. Null-safe.\n\n# Safety\n`s` must be null or a pointer returned by this library's `into_c_char` (i.e.\n`CString::into_raw`), freed exactly once."
+    }
+  ],
+  "value_structs": [],
+  "opaque_structs": [],
+  "enums": [],
+  "bitflags": []
+}

@@ -1,0 +1,24 @@
+[package]
+name = "orgmap_ffi"
+version = "0.1.0"
+edition = "2021"
+authors = ["nuck"]
+description = "C ABI bindings for the orgmap workgroup-identity protocol (consumed from C#/etc. via rustbind)."
+license = "MIT"
+repository = "https://github.com/holo-q/orgmap"
+
+[lib]
+crate-type = ["cdylib"]
+
+# Path-dep on the sibling orgmap lib (the ABI truth). This crate is a thin
+# extern "C" shim over orgmap's pub fns; rustbind generates the C# face from
+# THIS crate's src/lib.rs, not orgmap's (the manifest-gen parses the ffi crate).
+[dependencies]
+orgmap = { path = ".." }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
