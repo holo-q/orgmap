@@ -275,16 +275,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match command {
                 Some(PlugCommand::Sync { check: _, write }) => {
                     if write {
-                        return Err(
-                            "org plug sync --write is not implemented yet; use --check first"
-                                .into(),
-                        );
-                    }
-                    let report = orgmap::plugin::plugin_sync_report(&institution);
-                    if json {
-                        print_json(&report)?;
+                        let outcomes = orgmap::plugin::plugin_sync_write(&institution);
+                        if json {
+                            print_json(&outcomes)?;
+                        } else {
+                            print_plugin_write_outcomes(&outcomes);
+                        }
                     } else {
-                        print_plugin_sync_report(&report);
+                        let report = orgmap::plugin::plugin_sync_report(&institution);
+                        if json {
+                            print_json(&report)?;
+                        } else {
+                            print_plugin_sync_report(&report);
+                        }
                     }
                 }
                 Some(PlugCommand::Reload { host, reason }) => {
@@ -1025,6 +1028,31 @@ fn print_plugin_report(report: &orgmap::plugin::PluginReport) {
                 dim(&manifest)
             );
         }
+    }
+}
+
+fn print_plugin_write_outcomes(outcomes: &[orgmap::plugin::PluginWriteOutcome]) {
+    let wrote = outcomes.iter().filter(|outcome| outcome.wrote).count();
+    let aligned = outcomes
+        .iter()
+        .filter(|outcome| !outcome.wrote && outcome.error.is_none())
+        .count();
+    let failed = outcomes.iter().filter(|outcome| outcome.error.is_some()).count();
+    println!("org plug sync --write — generated provider manifests from canonical truth");
+    println!(
+        "  {} wrote · {} aligned · {} failed",
+        color(48, &wrote.to_string()),
+        color(244, &aligned.to_string()),
+        color(196, &failed.to_string()),
+    );
+    for outcome in outcomes {
+        let host = format!("{:?}", outcome.host).to_lowercase();
+        let tag = match &outcome.error {
+            Some(error) => format!("{} {}", color(196, "error"), error),
+            None if outcome.wrote => color(48, "wrote").to_string(),
+            None => color(244, "aligned").to_string(),
+        };
+        println!("  {tag}  {} {host}  {}", outcome.project, outcome.manifest.display());
     }
 }
 

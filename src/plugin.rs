@@ -400,6 +400,70 @@ fn dispatch_babel_reload_for_host(host: PluginHost, reason: &str) -> PluginReloa
     }
 }
 
+/// Outcome of writing one provider manifest from canonical truth.
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginWriteOutcome {
+    pub project: String,
+    pub host: PluginHost,
+    pub manifest: PathBuf,
+    /// `true` = manifest written, `false` = already disk-aligned (skipped).
+    pub wrote: bool,
+    pub error: Option<String>,
+}
+
+/// Generate + write every provider manifest from canonical `agent-plugin.toml`
+/// truth — the mutating counterpart to [`plugin_sync_report`]. Manifests already
+/// disk-aligned are skipped (idempotent). Projects without a truth file, or with
+/// an unparseable one, are skipped silently here (the verifier reports those).
+pub fn plugin_sync_write(institution: &Institution) -> Vec<PluginWriteOutcome> {
+    let mut outcomes = Vec::new();
+    for project in institution
+        .projects
+        .iter()
+        .filter(|project| project.local && !project.blacklisted)
+    {
+        let Some(path) = &project.path else { continue };
+        for truth in find_plugin_truths(path) {
+            let root = truth.parent().unwrap_or(&truth).to_path_buf();
+            let Ok(text) = std::fs::read_to_string(&truth) else { continue };
+            let Ok(truth_file) = toml::from_str::<PluginTruthFile>(&text) else { continue };
+            for (host, provider) in provider_truths(&truth_file) {
+                let manifest = root.join(provider_manifest_path(host, provider));
+                let generated = generate_provider_manifest(&truth_file, host, provider);
+                if read_json_normalized(&manifest)
+                    .map(|existing| existing == generated)
+                    .unwrap_or(false)
+                {
+                    outcomes.push(PluginWriteOutcome {
+                        project: project.name.clone(),
+                        host,
+                        manifest,
+                        wrote: false,
+                        error: None,
+                    });
+                    continue;
+                }
+                let rendered = serde_json::to_string_pretty(&generated)
+                    .map(|json| json + "\n")
+                    .unwrap_or_default();
+                let result = manifest
+                    .parent()
+                    .map(std::fs::create_dir_all)
+                    .unwrap_or(Ok(()))
+                    .and_then(|()| std::fs::write(&manifest, rendered));
+                outcomes.push(PluginWriteOutcome {
+                    project: project.name.clone(),
+                    host,
+                    manifest,
+                    wrote: result.is_ok(),
+                    error: result.err().map(|error| error.to_string()),
+                });
+            }
+        }
+    }
+    outcomes
+}
+
 fn project_sync_plans(project: &Project, path: &Path) -> Vec<PluginSyncPlan> {
     let truths = find_plugin_truths(path);
     if truths.is_empty() {
