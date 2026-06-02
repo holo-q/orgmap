@@ -106,7 +106,22 @@ internal static partial class Native
 
     // ===== Value structs (repr(C); field order is the memory layout) =====
 
-    // ===== Functions (4 DllImports, emitted in manifest order) =====
+    // ===== Functions (7 DllImports, emitted in manifest order) =====
+    /// <summary>
+    /// Resolve the boundary root that owns `facet` at `path`, returned as JSON
+    /// (`{"root":"…"}`) in a freshly-allocated C string. `facet` is a wire token
+    /// (`"group"`|`"build"`|`"presence"`); unknown/null defaults to **build** (the
+    /// build-gate boundary — the "who-waits-on-whom" unit). Never null for a valid
+    /// `path`: [`orgmap::boundary`] always yields a path (the path itself is the
+    /// floor). A null/non-UTF-8 `path` yields null.
+    /// 
+    /// Wraps [`orgmap::boundary`]. Free the result with [`orgmap_string_free`].
+    /// 
+    /// # Safety
+    /// `path` and `facet` must be null or valid NUL-terminated UTF-8 C strings.
+    /// </summary>
+    [DllImport(LibraryName, EntryPoint = "orgmap_boundary", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr OrgmapBoundary(IntPtr path, IntPtr facet);
     /// <summary>
     /// Parse a color token (bare ANSI index, `#RRGGBB` hex, or named ANSI color) to
     /// an ansi256 index. Returns `true` and writes the index to `out_ansi` when the
@@ -123,6 +138,33 @@ internal static partial class Native
     [DllImport(LibraryName, EntryPoint = "orgmap_color_text_to_ansi256", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool OrgmapColorTextToAnsi256(IntPtr text, IntPtr outAnsi);
+    /// <summary>
+    /// Resolve a path to its owning workgroup definition, returned as JSON (the
+    /// [`WorkgroupDefinitionJson`] shape) in a freshly-allocated C string, or
+    /// **null** when no workgroup marker encloses the path.
+    /// 
+    /// Wraps [`orgmap::definition_for_path`]. Free the result with
+    /// [`orgmap_string_free`].
+    /// 
+    /// # Safety
+    /// `path` must be a valid NUL-terminated UTF-8 C string.
+    /// </summary>
+    [DllImport(LibraryName, EntryPoint = "orgmap_definition_for_path", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr OrgmapDefinitionForPath(IntPtr path);
+    /// <summary>
+    /// Resolve the full ancestor stack of workgroup definitions enclosing `path`,
+    /// outermost → innermost, returned as a JSON **array** of
+    /// [`WorkgroupDefinitionJson`] in a freshly-allocated C string. Never null for a
+    /// valid call: a path with no enclosing markers yields `"[]"`.
+    /// 
+    /// Wraps [`orgmap::discover_workgroup_stack`]. Free the result with
+    /// [`orgmap_string_free`].
+    /// 
+    /// # Safety
+    /// `path` must be a valid NUL-terminated UTF-8 C string.
+    /// </summary>
+    [DllImport(LibraryName, EntryPoint = "orgmap_discover_workgroup_stack", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr OrgmapDiscoverWorkgroupStack(IntPtr path);
     /// <summary>
     /// Resolve a path to its owning workgroup identity, returned as JSON
     /// (`{"root","name","ansi256","icon"}`) in a freshly-allocated C string, or

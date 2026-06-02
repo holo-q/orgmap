@@ -1,7 +1,10 @@
 # Parity report — generated Native.cs vs prior interop file
-# manifest ffi=0.1.0, functions=4
+# manifest ffi=0.1.0, functions=7
 
-## added (0)  — manifest fns the old file lacked (drift gap closed)
+## added (3)  — manifest fns the old file lacked (drift gap closed)
+  + orgmap_boundary
+  + orgmap_definition_for_path
+  + orgmap_discover_workgroup_stack
 
 ## removed (0)  — old fns absent from manifest (stale / foreign helpers)
 

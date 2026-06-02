@@ -29,6 +29,7 @@ use std::ffi::{c_char, CStr, CString};
 use std::path::Path;
 use std::ptr;
 
+use orgmap::{Facet, WorkgroupDefinition};
 use serde::Serialize;
 
 /// Convert a borrowed C string to a Rust `&str`, or `None` on null / non-UTF-8.
@@ -152,6 +153,134 @@ pub extern "C" fn orgmap_section_ranks(orgmap_toml_path: *const c_char) -> *mut 
         })
         .collect();
     match serde_json::to_string(&rows) {
+        Ok(text) => into_c_char(text),
+        Err(_) => into_c_char("[]".to_string()),
+    }
+}
+
+/// Serializable mirror of [`orgmap::WorkgroupDefinition`] — the JSON shape the
+/// C# ergonomic layer parses. Like [`IdentityJson`], `PathBuf` roots render as
+/// display strings, and the `level`/`observation_mode` enums collapse to their
+/// `as_str()` token (`"umbrella"`, `"exact"`, …) rather than crossing as serde's
+/// externally-tagged enum reprs (which would leak `{"Custom": "…"}` /
+/// `"Umbrella"` quirks the C# side should never have to know). The `[scope]`
+/// declarations flatten to a single `build_scope` tri-state (`null` = no opinion,
+/// `true`/`false` = explicit boundary opt-in/out) mirroring [`orgmap::ScopeDecls`].
+#[derive(Serialize)]
+struct WorkgroupDefinitionJson {
+    root: String,
+    marker: String,
+    name: String,
+    level: String,
+    icon: Option<String>,
+    color: Option<String>,
+    ansi256: Option<u8>,
+    observation_mode: String,
+    observation_roots: Vec<String>,
+    build_scope: Option<bool>,
+}
+
+impl From<WorkgroupDefinition> for WorkgroupDefinitionJson {
+    fn from(definition: WorkgroupDefinition) -> Self {
+        Self {
+            root: definition.root.display().to_string(),
+            marker: definition.marker.display().to_string(),
+            name: definition.name,
+            level: definition.level.as_str().to_string(),
+            icon: definition.icon,
+            color: definition.color,
+            ansi256: definition.ansi256,
+            observation_mode: definition.observation_mode.as_str().to_string(),
+            observation_roots: definition
+                .observation_roots
+                .into_iter()
+                .map(|root| root.display().to_string())
+                .collect(),
+            build_scope: definition.scope.build,
+        }
+    }
+}
+
+/// Parse a facet wire token to the [`orgmap::Facet`] enum. The build-gate /
+/// "who-waits-on-whom" resolver is the primary consumer, so an unknown/empty
+/// token defaults to [`Facet::Build`] (the spec's stable default), never panics.
+fn parse_facet(token: Option<&str>) -> Facet {
+    match token.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("group") => Facet::Group,
+        Some("presence") => Facet::Presence,
+        // "build" and any unrecognized/missing token resolve to the Build facet.
+        _ => Facet::Build,
+    }
+}
+
+/// Resolve the boundary root that owns `facet` at `path`, returned as JSON
+/// (`{"root":"…"}`) in a freshly-allocated C string. `facet` is a wire token
+/// (`"group"`|`"build"`|`"presence"`); unknown/null defaults to **build** (the
+/// build-gate boundary — the "who-waits-on-whom" unit). Never null for a valid
+/// `path`: [`orgmap::boundary`] always yields a path (the path itself is the
+/// floor). A null/non-UTF-8 `path` yields null.
+///
+/// Wraps [`orgmap::boundary`]. Free the result with [`orgmap_string_free`].
+///
+/// # Safety
+/// `path` and `facet` must be null or valid NUL-terminated UTF-8 C strings.
+#[no_mangle]
+pub extern "C" fn orgmap_boundary(path: *const c_char, facet: *const c_char) -> *mut c_char {
+    let Some(path) = (unsafe { cstr_to_str(path) }) else {
+        return ptr::null_mut();
+    };
+    let facet = parse_facet(unsafe { cstr_to_str(facet) });
+    let root = orgmap::boundary(Path::new(path), facet);
+    // A bare `{"root": "…"}` object mirrors IdentityJson's shape conventions; an
+    // object (not a raw string) leaves room for the resolver to grow without an
+    // ABI break.
+    match serde_json::to_string(&serde_json::json!({ "root": root.display().to_string() })) {
+        Ok(text) => into_c_char(text),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Resolve a path to its owning workgroup definition, returned as JSON (the
+/// [`WorkgroupDefinitionJson`] shape) in a freshly-allocated C string, or
+/// **null** when no workgroup marker encloses the path.
+///
+/// Wraps [`orgmap::definition_for_path`]. Free the result with
+/// [`orgmap_string_free`].
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated UTF-8 C string.
+#[no_mangle]
+pub extern "C" fn orgmap_definition_for_path(path: *const c_char) -> *mut c_char {
+    let Some(path) = (unsafe { cstr_to_str(path) }) else {
+        return ptr::null_mut();
+    };
+    let Some(definition) = orgmap::definition_for_path(Path::new(path)) else {
+        return ptr::null_mut();
+    };
+    match serde_json::to_string(&WorkgroupDefinitionJson::from(definition)) {
+        Ok(text) => into_c_char(text),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Resolve the full ancestor stack of workgroup definitions enclosing `path`,
+/// outermost → innermost, returned as a JSON **array** of
+/// [`WorkgroupDefinitionJson`] in a freshly-allocated C string. Never null for a
+/// valid call: a path with no enclosing markers yields `"[]"`.
+///
+/// Wraps [`orgmap::discover_workgroup_stack`]. Free the result with
+/// [`orgmap_string_free`].
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated UTF-8 C string.
+#[no_mangle]
+pub extern "C" fn orgmap_discover_workgroup_stack(path: *const c_char) -> *mut c_char {
+    let path = unsafe { cstr_to_str(path) }.unwrap_or("");
+    let stack: Vec<WorkgroupDefinitionJson> = orgmap::discover_workgroup_stack(Path::new(path))
+        .into_iter()
+        .map(WorkgroupDefinitionJson::from)
+        .collect();
+    match serde_json::to_string(&stack) {
         Ok(text) => into_c_char(text),
         Err(_) => into_c_char("[]".to_string()),
     }

@@ -3,6 +3,39 @@
   "ffi_version": "0.1.0",
   "functions": [
     {
+      "name": "orgmap_boundary",
+      "params": [
+        {
+          "name": "path",
+          "type": {
+            "kind": "ptr",
+            "mutable": false,
+            "elem": {
+              "kind": "char"
+            }
+          }
+        },
+        {
+          "name": "facet",
+          "type": {
+            "kind": "ptr",
+            "mutable": false,
+            "elem": {
+              "kind": "char"
+            }
+          }
+        }
+      ],
+      "ret": {
+        "kind": "ptr",
+        "mutable": true,
+        "elem": {
+          "kind": "char"
+        }
+      },
+      "doc": "Resolve the boundary root that owns `facet` at `path`, returned as JSON\n(`{\"root\":\"…\"}`) in a freshly-allocated C string. `facet` is a wire token\n(`\"group\"`|`\"build\"`|`\"presence\"`); unknown/null defaults to **build** (the\nbuild-gate boundary — the \"who-waits-on-whom\" unit). Never null for a valid\n`path`: [`orgmap::boundary`] always yields a path (the path itself is the\nfloor). A null/non-UTF-8 `path` yields null.\n\nWraps [`orgmap::boundary`]. Free the result with [`orgmap_string_free`].\n\n# Safety\n`path` and `facet` must be null or valid NUL-terminated UTF-8 C strings."
+    },
+    {
       "name": "orgmap_color_text_to_ansi256",
       "params": [
         {
@@ -32,6 +65,52 @@
         "name": "bool"
       },
       "doc": "Parse a color token (bare ANSI index, `#RRGGBB` hex, or named ANSI color) to\nan ansi256 index. Returns `true` and writes the index to `out_ansi` when the\ntoken resolves; returns `false` (leaving `out_ansi` untouched) otherwise.\n\nWraps [`orgmap::color_text_to_ansi256`] — including the theme-balanced\nperceptual-luminance hex→ansi256 bisection that babel's C# port could not\nreplicate.\n\n# Safety\n`text` must be a valid NUL-terminated UTF-8 C string; `out_ansi` must be a\nvalid, writable `*mut u8`."
+    },
+    {
+      "name": "orgmap_definition_for_path",
+      "params": [
+        {
+          "name": "path",
+          "type": {
+            "kind": "ptr",
+            "mutable": false,
+            "elem": {
+              "kind": "char"
+            }
+          }
+        }
+      ],
+      "ret": {
+        "kind": "ptr",
+        "mutable": true,
+        "elem": {
+          "kind": "char"
+        }
+      },
+      "doc": "Resolve a path to its owning workgroup definition, returned as JSON (the\n[`WorkgroupDefinitionJson`] shape) in a freshly-allocated C string, or\n**null** when no workgroup marker encloses the path.\n\nWraps [`orgmap::definition_for_path`]. Free the result with\n[`orgmap_string_free`].\n\n# Safety\n`path` must be a valid NUL-terminated UTF-8 C string."
+    },
+    {
+      "name": "orgmap_discover_workgroup_stack",
+      "params": [
+        {
+          "name": "path",
+          "type": {
+            "kind": "ptr",
+            "mutable": false,
+            "elem": {
+              "kind": "char"
+            }
+          }
+        }
+      ],
+      "ret": {
+        "kind": "ptr",
+        "mutable": true,
+        "elem": {
+          "kind": "char"
+        }
+      },
+      "doc": "Resolve the full ancestor stack of workgroup definitions enclosing `path`,\noutermost → innermost, returned as a JSON **array** of\n[`WorkgroupDefinitionJson`] in a freshly-allocated C string. Never null for a\nvalid call: a path with no enclosing markers yields `\"[]\"`.\n\nWraps [`orgmap::discover_workgroup_stack`]. Free the result with\n[`orgmap_string_free`].\n\n# Safety\n`path` must be a valid NUL-terminated UTF-8 C string."
     },
     {
       "name": "orgmap_identity_for_path",
