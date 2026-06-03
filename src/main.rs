@@ -335,24 +335,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             secrets_only,
             no_fail,
         }) => {
-            let institution = filtered_institution(
-                cli.config.as_deref(),
-                project.as_deref(),
-                orgmap::institution::LoadOptions::MAP_ONLY,
-            )?;
+            // PATH MODE: a positional naming a path (".", "..", contains '/',
+            // or an existing dir) screens that git repo directly — even if it
+            // isn't a registered orgmap project. `org screen <name>` only scans
+            // scan-root children, silently skipping nested-workgroup repos
+            // (e.g. repo-com/ratatui/ratatui-ffi); path mode is what the
+            // universal pre-push hook runs (`org screen .`).
+            let path_arg: Option<std::path::PathBuf> = project.as_deref().and_then(|p| {
+                let looks_path =
+                    p == "." || p == ".." || p.contains('/') || std::path::Path::new(p).is_dir();
+                looks_path.then(|| std::path::PathBuf::from(p))
+            });
             let mut skip_screeners = skip_screener;
             if no_gitleaks {
                 skip_screeners.push("gitleaks".to_string());
             }
-            // Deep screeners run when the scan is project-scoped (you're about
-            // to publish that one repo) or `--deep` is explicit. A bare
-            // org-wide scan leaves them off so gitleaks can't multiply.
+            // Deep screeners run when the scan is project-/path-scoped (you're
+            // about to publish/push that one repo) or `--deep` is explicit. A
+            // bare org-wide scan leaves them off so gitleaks can't multiply.
             let run_deep = project.is_some() || deep;
             let opts = orgmap::screen::ScreenOptions {
                 skip_screeners,
                 secrets_only,
                 run_deep,
             };
+            // Institution supplies the [screen] config + screener registry +
+            // root. In path mode we load it for config only (no project filter)
+            // and screen the given path; otherwise the optional name filter applies.
+            let institution = filtered_institution(
+                cli.config.as_deref(),
+                if path_arg.is_some() { None } else { project.as_deref() },
+                orgmap::institution::LoadOptions::MAP_ONLY,
+            )?;
             // `--list-screeners` resolves the registry without scanning.
             if list_screeners {
                 let active = orgmap::screen::active_screeners(&institution, &opts);
@@ -366,7 +380,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return Ok(());
             }
-            let report = orgmap::screen::run(&institution, &opts);
+            let report = match &path_arg {
+                Some(p) => orgmap::screen::run_path(&institution, p, &opts),
+                None => orgmap::screen::run(&institution, &opts),
+            };
             if json {
                 print_json(&report)?;
             } else {

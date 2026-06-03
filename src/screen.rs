@@ -387,6 +387,66 @@ pub fn run(institution: &Institution, opts: &ScreenOptions) -> ScreenReport {
     report
 }
 
+/// Screen a single git repo at `path` DIRECTLY, bypassing orgmap project
+/// resolution. `org screen <project>` only scans projects registered under the
+/// scan roots, so it silently skips nested-workgroup repos (e.g.
+/// `repo-com/ratatui/ratatui-ffi`). This path mode (`org screen .`) screens
+/// whatever git tree it's pointed at — the basis of the universal pre-push hook.
+/// The nearest `institution` still supplies the `[screen]` config (allowlists,
+/// personal paths) and screener registry so results match a registered scan.
+pub fn run_path(institution: &Institution, path: &Path, opts: &ScreenOptions) -> ScreenReport {
+    let cfg = institution_screen_config(institution);
+    let static_patterns = build_static_patterns();
+    let dynamic_patterns = build_dynamic_patterns(&cfg);
+    let screeners = resolve_screeners(&cfg, &institution.root, opts);
+    let screeners_active: Vec<String> = screeners.iter().map(|s| s.name.clone()).collect();
+
+    // Name the synthetic project after the repo dir (used for per-project allow
+    // lookups + the report row label).
+    let name = path
+        .canonicalize()
+        .ok()
+        .as_deref()
+        .and_then(Path::file_name)
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".to_string());
+    let project = Project {
+        name: name.clone(),
+        display_name: name,
+        workspace: String::new(),
+        section: String::new(),
+        path: Some(path.to_path_buf()),
+        stage: None,
+        description: None,
+        tagline: None,
+        local: true,
+        blacklisted: false,
+        git: None,
+    };
+
+    let pf = scan_project(
+        &project,
+        path,
+        &cfg,
+        &static_patterns,
+        &dynamic_patterns,
+        &screeners,
+        &institution.root,
+        opts,
+    );
+    ScreenReport {
+        gh_org: institution.gh_org.clone(),
+        root: institution.root.clone(),
+        projects_scanned: 1,
+        projects_skipped: 0,
+        critical: pf.critical,
+        warn: pf.warn,
+        info: pf.info,
+        screeners_active,
+        projects: vec![pf],
+    }
+}
+
 fn institution_screen_config(institution: &Institution) -> ScreenConfig {
     // Re-read the orgmap.toml to pluck the [screen] block. The Institution
     // type doesn't carry it through (loader path predates this feature) —
