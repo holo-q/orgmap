@@ -1,0 +1,52 @@
+#!/bin/sh
+# org-hook-dispatch — the org's universal git hook, wired in for every repo via a
+# global `core.hooksPath`. One script, symlinked under each hook name (pre-push,
+# pre-commit, …). Installed + kept current by `org hooks install`. Two jobs:
+#
+#   1. PRE-PUSH SECRET GATE: on `git push` from any repo under the org root
+#      (default ~/holoq, override with ORG_HOOK_ROOT), run
+#      `org screen . --secrets-only` and BLOCK the push if a secret (API key,
+#      token, private key) is found. Pathleaks are NOT gated here — they're
+#      pervasive across the org and remain the publish-time gate; gating them
+#      would make the org unpushable. gitleaks is skipped for speed (the baked-in
+#      regex set is the fast push gate; full gitleaks runs at publish).
+#
+#   2. CHAIN: a global core.hooksPath OVERRIDES each repo's own .git/hooks/*, so
+#      this dispatcher re-invokes the repo-local hook of the same name if one
+#      exists — husky / pre-commit-framework / upstream hooks keep working
+#      instead of being silently disabled.
+#
+# Bypass the secret gate: `git push --no-verify`, or `ORG_SCREEN_SKIP=1 git push`.
+
+hook=$(basename "$0")
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+org_root="${ORG_HOOK_ROOT:-$HOME/holoq}"
+
+# --- 1. pre-push secret gate (org repos only) ------------------------------
+if [ "$hook" = "pre-push" ] && [ -z "$ORG_SCREEN_SKIP" ] && [ -n "$repo_root" ]; then
+    case "$repo_root" in
+        "$org_root"/*)
+            if command -v org >/dev/null 2>&1; then
+                screen_out=$(org screen "$repo_root" --secrets-only --no-gitleaks 2>&1)
+                if [ $? -ne 0 ]; then
+                    printf '%s\n' "$screen_out" >&2
+                    echo "" >&2
+                    echo "✗ push blocked — org screen found a secret in this repo." >&2
+                    echo "  Rotate the credential, remove it from the tree (and history)," >&2
+                    echo "  then push again. To bypass: git push --no-verify" >&2
+                    exit 1
+                fi
+            fi
+            ;;
+    esac
+fi
+
+# --- 2. chain to the repo-local hook (core.hooksPath hides it otherwise) -----
+if [ -n "$repo_root" ]; then
+    local_hook="$repo_root/.git/hooks/$hook"
+    if [ -x "$local_hook" ] && [ "$(readlink -f "$local_hook" 2>/dev/null)" != "$(readlink -f "$0" 2>/dev/null)" ]; then
+        exec "$local_hook" "$@"
+    fi
+fi
+
+exit 0

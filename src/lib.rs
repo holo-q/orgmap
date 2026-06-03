@@ -38,6 +38,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
+pub mod hooks;
 pub mod institution;
 pub mod plugin;
 pub mod screen;

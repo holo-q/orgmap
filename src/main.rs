@@ -137,6 +137,30 @@ enum Command {
         #[arg(long)]
         no_fail: bool,
     },
+    /// Install / inspect the org's universal git hooks — a pre-push secret gate
+    /// wired via global core.hooksPath that runs `org screen` on every org-repo
+    /// push (and chains to each repo's own hooks).
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
+    },
+}
+
+/// `org hooks <action>`.
+#[derive(Debug, clap::Subcommand)]
+enum HooksAction {
+    /// Install the dispatcher + hook symlinks and point global core.hooksPath at them.
+    Install {
+        /// Hooks dir (default: $XDG_CONFIG_HOME/org/git-hooks).
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+    },
+    /// Show the current hook installation state.
+    Status {
+        /// Hooks dir to inspect (default: $XDG_CONFIG_HOME/org/git-hooks).
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -393,6 +417,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(report.exit_code());
             }
         }
+        Some(Command::Hooks { action }) => match action {
+            HooksAction::Install { dir } => {
+                let dir = dir.unwrap_or_else(orgmap::hooks::default_dir);
+                orgmap::hooks::install(&dir)?;
+            }
+            HooksAction::Status { dir } => {
+                let dir = dir.unwrap_or_else(orgmap::hooks::default_dir);
+                orgmap::hooks::status(&dir);
+            }
+        },
     }
     Ok(())
 }
