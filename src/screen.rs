@@ -633,8 +633,8 @@ fn scan_text(
             };
             let mut severity = pattern.severity;
             // Docs (markdown, etc.) downgrade pathleak Warn to Info — the
-            // README is the right place to *say* `/home/nuck` exists; the
-            // wrong place is hardcoded source. Per-pattern `docs_downgrade`
+            // README is the right place to *say* a home path like `/home/you`
+            // exists; the wrong place is hardcoded source. Per-pattern `docs_downgrade`
             // opts out; secrets (Critical) never downgrade.
             if is_doc && severity == Severity::Warn && pattern.docs_downgrade {
                 severity = Severity::Info;
@@ -887,6 +887,45 @@ pub fn active_screeners(institution: &Institution, opts: &ScreenOptions) -> Vec<
         .into_iter()
         .map(|s| s.name)
         .collect()
+}
+
+/// One internal (built-in) pattern screener, for `--list-screeners` / `org
+/// screeners` — so callers can SEE the full verification surface, not just the
+/// external registry. `detail` is the regex (or matched literal) it scans for.
+pub struct ScreenerInfo {
+    pub name: String,
+    pub severity: Severity,
+    pub detail: String,
+}
+
+/// Enumerate the always-on internal pattern screeners: the baked-in secret +
+/// sloppy patterns plus the config-derived pathleak patterns (personal paths +
+/// handles). These run on every scan regardless of the external registry — this
+/// is what makes them invisible without an explicit listing.
+pub fn internal_screeners(institution: &Institution) -> Vec<ScreenerInfo> {
+    let cfg = institution_screen_config(institution);
+    let mut out: Vec<ScreenerInfo> = Vec::new();
+    for p in build_static_patterns() {
+        out.push(ScreenerInfo {
+            name: p.id,
+            severity: p.severity,
+            detail: p.regex.as_str().to_string(),
+        });
+    }
+    for p in build_dynamic_patterns(&cfg) {
+        out.push(ScreenerInfo {
+            name: p.id,
+            severity: p.severity,
+            detail: p.regex.as_str().to_string(),
+        });
+    }
+    // Critical first, then Warn, then Info — most-severe surface up top.
+    out.sort_by(|a, b| {
+        (b.severity as u8)
+            .cmp(&(a.severity as u8))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    out
 }
 
 /// Whether a screener's command can be found. A bare name is looked up on

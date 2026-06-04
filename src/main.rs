@@ -137,6 +137,10 @@ enum Command {
         #[arg(long)]
         no_fail: bool,
     },
+    /// List everything `org screen` verifies — the always-on INTERNAL pattern
+    /// screeners (secrets, pathleaks, sloppy) plus the EXTERNAL screener registry
+    /// (modrs-purity, gitleaks, …). So you can see the full surface at a glance.
+    Screeners,
     /// Install / inspect the org's universal git hooks — a pre-push secret gate
     /// wired via global core.hooksPath that runs `org screen` on every org-repo
     /// push (and chains to each repo's own hooks).
@@ -391,17 +395,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if path_arg.is_some() { None } else { project.as_deref() },
                 orgmap::institution::LoadOptions::MAP_ONLY,
             )?;
-            // `--list-screeners` resolves the registry without scanning.
+            // `--list-screeners` shows the full verification surface (internal
+            // pattern screeners + external registry) without scanning.
             if list_screeners {
-                let active = orgmap::screen::active_screeners(&institution, &opts);
-                println!("{} — screeners that would run", color_bold(196, "org screen"));
-                if active.is_empty() {
-                    println!("  {}", dim("none"));
-                } else {
-                    for name in &active {
-                        println!("  {}", color(48, name));
-                    }
-                }
+                print_screeners(&institution, &opts);
                 return Ok(());
             }
             let report = match &path_arg {
@@ -417,6 +414,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(report.exit_code());
             }
         }
+        Some(Command::Screeners) => {
+            let institution = filtered_institution(
+                cli.config.as_deref(),
+                None,
+                orgmap::institution::LoadOptions::MAP_ONLY,
+            )?;
+            let opts = orgmap::screen::ScreenOptions {
+                skip_screeners: Vec::new(),
+                secrets_only: false,
+                run_deep: false,
+            };
+            print_screeners(&institution, &opts);
+        }
         Some(Command::Hooks { action }) => match action {
             HooksAction::Install { dir } => {
                 let dir = dir.unwrap_or_else(orgmap::hooks::default_dir);
@@ -429,6 +439,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     }
     Ok(())
+}
+
+/// Print the full verification surface: the always-on internal pattern screeners
+/// (grouped by severity) followed by the external screener registry. Shared by
+/// `org screeners` and `org screen --list-screeners`.
+fn print_screeners(
+    institution: &orgmap::institution::Institution,
+    opts: &orgmap::screen::ScreenOptions,
+) {
+    println!("{} — full verification surface\n", color_bold(196, "org screen"));
+
+    println!("{}", color_bold(48, "Internal screeners (always on):"));
+    let internal = orgmap::screen::internal_screeners(institution);
+    if internal.is_empty() {
+        println!("  {}", dim("none"));
+    } else {
+        let mut last: Option<&str> = None;
+        for s in &internal {
+            let label = s.severity.label();
+            if last != Some(label) {
+                println!("  {} {}", s.severity.icon(), color_bold(s.severity.ansi(), label));
+                last = Some(label);
+            }
+            println!("    {:<20} {}", s.name, dim(&s.detail));
+        }
+    }
+
+    println!("\n{}", color_bold(48, "External screeners (registry):"));
+    let active = orgmap::screen::active_screeners(institution, opts);
+    if active.is_empty() {
+        println!("  {}", dim("none configured / resolvable on PATH"));
+    } else {
+        for name in &active {
+            println!("  {}", color(48, name));
+        }
+    }
 }
 
 fn print_plugin_reload_report(report: &orgmap::plugin::PluginReloadReport) {
