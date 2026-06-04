@@ -2,7 +2,7 @@
 name = "orgmap"
 version = "0.1.0"
 edition = "2021"
-authors = ["nuck"]
+authors = ["holo-q"]
 description = "Organization/workgroup marker protocol and shell utility"
 license = "MIT"
 repository = "https://github.com/holo-q/orgmap"

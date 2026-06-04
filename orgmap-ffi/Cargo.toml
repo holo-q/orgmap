@@ -2,7 +2,7 @@
 name = "orgmap_ffi"
 version = "0.1.0"
 edition = "2021"
-authors = ["nuck"]
+authors = ["holo-q"]
 description = "C ABI bindings for the orgmap workgroup-identity protocol (consumed from C#/etc. via rustbind)."
 license = "MIT"
 repository = "https://github.com/holo-q/orgmap"
