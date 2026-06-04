@@ -1,6 +1,4 @@
-# Residue — FFI functions with NO ergonomic wrapper under src/Orgmap (3 of 7)
+# Residue — FFI functions with NO ergonomic wrapper under src/Orgmap (0 of 7)
 # These appear only in generated Native.cs. Manual-work worklist for the ergonomic layer.
 
-orgmap_boundary
-orgmap_definition_for_path
-orgmap_discover_workgroup_stack
+

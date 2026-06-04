@@ -36,4 +36,10 @@
          instead of as a warning storm in each consumer. -->
     <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
+
+  <!-- rustbind-generated native-asset packaging: copies liborgmap_ffi.so into every
+       consumer's bin + publish dir so the default DllImport probe finds it with no
+       ORGMAP_FFI_DIR. Conditional so a pre-regen checkout still loads. -->
+  <Import Project="Interop/Orgmap.Native.targets"
+          Condition="Exists('$(MSBuildThisFileDirectory)Interop/Orgmap.Native.targets')" />
 </Project>

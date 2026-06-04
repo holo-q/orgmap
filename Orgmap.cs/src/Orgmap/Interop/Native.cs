@@ -5,6 +5,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Reflection;
 using System.IO;
+using System.Runtime.CompilerServices;
 
 namespace OrgmapBinding.Interop;
 
@@ -25,9 +26,13 @@ internal static partial class Native
         }
     }
 
+    #pragma warning disable CA2255
+    [ModuleInitializer]
+    internal static void Initialize() => EnsureResolver();
+    #pragma warning restore CA2255
+
     private static IntPtr Resolve(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
     {
-        EnsureResolver();
         if (!string.Equals(libraryName, LibraryName, StringComparison.Ordinal))
             return IntPtr.Zero;
 

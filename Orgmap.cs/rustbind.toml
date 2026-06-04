@@ -25,6 +25,11 @@ ffi_dir_env_var      = "ORGMAP_FFI_DIR"
 ffi_path_env_var     = "ORGMAP_FFI_PATH"
 # version_probe_fn intentionally omitted — orgmap-ffi has no version self-check.
 native_search_subdir = "orgmap-ffi"
+# Generated .targets that packages liborgmap_ffi.so as a copy-to-output/publish runtime
+# asset, so every consumer (babel, bob, hsp) carries it beside their binary and the default
+# DllImport probe finds it with NO ORGMAP_FFI_DIR. Imported by Orgmap.csproj. The env/
+# target-walk resolver in Native.cs then demotes to an override for odd layouts.
+native_targets_path  = "src/Orgmap/Interop/Orgmap.Native.targets"
 
 # ── pipeline I/O paths (relative to this config's directory) ────────────────────
 manifest_path = "../orgmap-ffi/bindings.json"
