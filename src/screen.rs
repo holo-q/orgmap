@@ -289,7 +289,12 @@ fn build_dynamic_patterns(cfg: &ScreenConfig) -> Vec<Pattern> {
         if handle.is_empty() {
             continue;
         }
-        if let Ok(regex) = Regex::new(&regex::escape(handle)) {
+        // Word-bounded: a handle like "nuck" must match as a whole token, not as
+        // a substring of "ryunuck"/"canuck"/etc. Paths (above) stay unbounded —
+        // a path fragment legitimately matches inside a longer path. `\b` sits on
+        // the handle's outer word chars (names/emails start+end word-char), so
+        // interior `@`/`.` are unaffected.
+        if let Ok(regex) = Regex::new(&format!(r"\b{}\b", regex::escape(handle))) {
             out.push(Pattern {
                 id: "personal_handle".to_string(),
                 severity: Severity::Warn,
